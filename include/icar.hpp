@@ -78,7 +78,8 @@ private:
     std::condition_variable cvImg;
     std::atomic<bool> readyImg{false};
     std::mutex mtxRes;
-    std::atomic<bool> readyRes{false};
+    std::vector<PredictResult> resultsShare{}; // mtxRes 保护的最新完整推理结果
+    std::atomic<bool> readyRes{false}; // 已废弃：无消费者，保留声明与原写入
 
     /**
      * @brief 鼠标的事件回调函数
@@ -131,7 +132,7 @@ private:
         // 启动AI推理
         detection->inference(img);
         std::lock_guard<std::mutex> lock_result(mtxRes);
-        params->results = detection->results;
+        resultsShare = detection->results; // AI 只发布结果，不写主线程帧快照
         readyRes = true;
     }
 
@@ -293,6 +294,12 @@ public:
         else if (!capture->read(img))
             return;
 
+        // 帧首快照：本帧 FSM 与绘图共用，后续不再更新
+        {
+            std::lock_guard<std::mutex> lock_result(mtxRes);
+            params->results = resultsShare;
+        }
+
         //[02] 图像存储
         if (params->config.saveImg && !params->config.debug) // 存储原始图像
             savePicture(img);
@@ -303,10 +310,13 @@ public:
         cv::Mat imgBin;
         predeal->correction(img); // 图像矫正
         /*---------------子线程共享数据，避免浅拷贝-----------------*/
-        std::lock_guard<std::mutex> lock(mtxImg);
-        imgShare = img.clone();
-        readyImg = true;
-        cvImg.notify_one();
+        {
+            // 锁只保护共享缓冲的交接，不要扩大作用域
+            std::lock_guard<std::mutex> lock(mtxImg);
+            imgShare = img.clone();
+            readyImg = true;
+            cvImg.notify_one();
+        }
         /*-------------------------------------------------------*/
         imgBin = predeal->binaryzation(img); // 图像二值化
 
@@ -340,7 +350,7 @@ public:
         //[08] 综合显示调试UI窗口
         if (params->config.debug)
         {
-            detection->drawBox(img);        // 图像绘制AI结果
+            detection->drawBox(img, params->results);        // 图像绘制AI结果
             center->drawImage(params, img); // 图像绘制控制路径
             motion->drawImage(params, img); // 图像绘制速度
             show->setNewWindow(3, "Ctrl", img);

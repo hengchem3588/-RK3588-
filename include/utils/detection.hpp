@@ -296,11 +296,17 @@ public:
         }
     }
 
+    // 单线程工具兼容入口；并发主循环必须传入帧快照
     void drawBox(Mat &img)
     {
-        for (int i = 0; i < results.size(); i++)
+        drawBox(img, results);
+    }
+
+    void drawBox(Mat &img, const std::vector<PredictResult> &resultsSnapshot)
+    {
+        for (int i = 0; i < resultsSnapshot.size(); i++)
         {
-            PredictResult result = results[i];
+            PredictResult result = resultsSnapshot[i];
 
             if (std::find(drawSkipLabels.begin(), drawSkipLabels.end(), result.type) != drawSkipLabels.end())
                 continue; // 跳过指定标签（normal态滤掉fork，避免框盖住车道线影响画线）
