@@ -1,0 +1,6 @@
+build/
+res/samples/imgs/*.jpg
+res/samples/train/*.jpg
+*.pyc
+__pycache__/
+.vscode/

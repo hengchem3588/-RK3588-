@@ -1,0 +1,15 @@
+cone
+person
+busy
+limit
+unlimit
+stop
+flow
+park
+gate
+cross
+fork
+left
+choice
+yleft
+yright
