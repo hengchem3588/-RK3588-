@@ -97,7 +97,12 @@ void FsmSlow::run(Mat &img)
         break;
 
     case Step::ENABLE: // 减速阶段
-        timeout++;
+    {
+        const int MIN_SLOW_FRAMES = params->config.slowMinFrames;
+        if (params->slowActiveFrames < 60000)
+            params->slowActiveFrames++; // 独立累计；只有 setStep 才复位
+        if (timeout < 60000)
+            timeout++;
         params->ctrl.slow = true; // 车辆减速标志
         for (int i = 0; i < params->results.size(); i++)
         {
@@ -114,12 +119,13 @@ void FsmSlow::run(Mat &img)
                 if (params->results[i].height < 100 && params->results[i].width < 80 &&
                     (params->results[i].y + params->results[i].height) > ROWSIMAGE * 0.2) // 标志距离计算
                 {
-                    countRec++;
+                    if (params->slowActiveFrames >= MIN_SLOW_FRAMES)
+                        countRec++;
                     break;
                 }
             }
         }
-        if (countRec >= 2 || timeout > 110) // 减速超时时长
+        if ((countRec >= 2 || timeout > 110) && params->slowActiveFrames >= MIN_SLOW_FRAMES) // 最小持续量保护全部退出路径
             setStep(Step::NONE);
 
         if (countRec > 0) // 识别AI标志后开始场次计数
@@ -132,6 +138,7 @@ void FsmSlow::run(Mat &img)
             }
         }
         break;
+    }
 
     default:
         break;
@@ -150,6 +157,8 @@ void FsmSlow::show(Mat &img)
 
     putText(img, "[6] Slow", Point(COLSIMAGE / 2 - 50, 20),
             cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 0.5);
+    putText(img, "Slow:" + to_string(params->slowActiveFrames) + "/" + to_string(params->config.slowMinFrames) +
+                 " Gap:" + to_string(timeout), Point(8, 80), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 255, 0), 1);
 }
 
 /**
@@ -163,4 +172,5 @@ void FsmSlow::setStep(Step st)
     countRec = 0; // AI场景识别计数器
     countSes = 0; // 场次计数器
     timeout = 0;  // 超时计数器
+    params->slowActiveFrames = 0;
 }

@@ -107,6 +107,7 @@ struct Config
     int binary = -1;                                    // 图像二值化阈值
     string model = "../res/models/yolov3_mobilenet_v1"; // 模型路径
     string video = "../res/samples/sample.mp4";         // 视频路径
+    int slowMinFrames = 111; // 原 timeout>110 的退出尺度：111/30=3.7秒，区间长度仍需实测
     NLOHMANN_DEFINE_TYPE_INTRUSIVE(Config, velLow, velHigh, velSlow, velPark, velYFork, velBusy, velStop, velCross,
                                    runP1, runP2, turnP, turnD, debug, saveImg, saveIpm, rowCutUp, rowCutBottom,
                                    fork, fine, park, spot, parkSpot, busy, slow, stop, yfork, cross, obstacle,
@@ -139,6 +140,13 @@ public:
         try
         {
             config = configs.get<Config>();
+            if (configs.contains("slowMinFrames"))
+                configs.at("slowMinFrames").get_to(config.slowMinFrames);
+            if (config.slowMinFrames < 1 || config.slowMinFrames > 60000)
+            {
+                std::cerr << "slowMinFrames must be in [1,60000]" << std::endl;
+                exit(-1);
+            }
         }
         catch (const nlohmann::detail::exception &e)
         {
@@ -159,6 +167,7 @@ public:
     FsmMode mode, modeLast;             // FSM状态场景
     shared_ptr<Track> track;            // 赛道识别类
     std::vector<PredictResult> results; // AI推理结果
+    int slowActiveFrames = 0;          // 本次慢行累计帧数，LIMIT 检测不清零
     int lapCount = 0;                  // 已完成圈数：仅由起终点停车事件累计
     bool finishStop = false;            // 第二圈终点停车完成标志
     bool quit = false;                  // 停标触发退出进程标志(主循环检测后先舵机归中再退出)
