@@ -67,7 +67,7 @@ void Track::handle(bool isResearch, uint16_t rowStart)
         validRowsLeft = 0;                   // 边缘有效行数（左）
         validRowsRight = 0;                  // 边缘有效行数（右）
         flagStartBlock = true;               // 搜索到色块起始行的标志（行）
-        rowStart = ROWSIMAGE;
+        rowStart = ROWSIMAGE - 1;
     }
     else
     {
