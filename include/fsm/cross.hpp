@@ -58,6 +58,9 @@ private:
   int countInit = 0;      // 起点屏蔽计数器
   int countStop = 0;      // 停标连续识别计数器（连续2帧确认）
   bool stopSeen = false;  // 曾看到STOP停标
+  bool lapArmed = true;   // 一次通过只允许累计一圈
+  bool lapCounted = false; // 当前停车事件已计圈
+  int countLapClear = 0;  // 起终点标志连续消失计数，跨状态保留
 
   void setStep(Step st);
 };

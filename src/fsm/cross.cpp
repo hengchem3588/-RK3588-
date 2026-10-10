@@ -69,6 +69,26 @@ void FsmCross::run(Mat &img)
     else if (countInit < 60)
         return;
 
+    // 离开同一起终点后才重新允许计圈；短暂丢框不能解除重复计数屏蔽。
+    if (step == Step::NONE && !lapArmed)
+    {
+        bool startFinishSeen = false;
+        for (const auto &result : params->results)
+        {
+            if (result.type == LABEL_CROSS || result.type == LABEL_STOP)
+            {
+                startFinishSeen = true;
+                break;
+            }
+        }
+        if (startFinishSeen)
+            countLapClear = 0;
+        else if (countLapClear < 60)
+            countLapClear++;
+        if (countLapClear >= 60) // 沿用原屏蔽尺度：30fps 下连续 2 秒无标志
+            lapArmed = true;
+    }
+
     switch (step)
     {
     case Step::NONE: // AI未识别
@@ -79,7 +99,7 @@ void FsmCross::run(Mat &img)
 
         for (int i = 0; i < params->results.size(); i++)
         {
-            if (params->results[i].type == LABEL_CROSS && countCross > 60) // 禁行标志：斑马线
+            if (params->results[i].type == LABEL_CROSS && countCross > 60 && lapArmed) // 禁行标志：斑马线
             {
                 countRec++;
                 break;
@@ -161,9 +181,22 @@ void FsmCross::run(Mat &img)
         params->ctrl.crossStop = true; // 停车标志
 
         timeout++; // 场次计数器
-        if (timeout >= 30) // 停稳后请求退出（主循环收到后先舵机归中再退进程）
+        if (timeout >= 30) // 每圈先停留 30 帧；只有第二圈请求退出
         {
-            params->quit = true; // 置退出标志，主循环统一执行舵机归中后退出
+            if (!lapCounted)
+            {
+                params->lapCount++;
+                lapCounted = true;
+                lapArmed = false;
+                countLapClear = 0;
+            }
+            if (params->lapCount >= 2)
+            {
+                params->finishStop = true;
+                params->quit = true; // 置退出标志，主循环统一执行舵机归中后退出
+            }
+            else
+                setStep(Step::NONE); // 第一圈只解除 crossStop，不清除其他 FSM 的 stop
         }
         break;
     }
@@ -177,6 +210,8 @@ void FsmCross::run(Mat &img)
  */
 void FsmCross::show(Mat &img)
 {
+    putText(img, "Lap:" + to_string(params->lapCount) + "/2 Armed:" + to_string(lapArmed),
+            Point(8, ROWSIMAGE - 8), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 255, 0), 1);
     if (params->mode != FsmMode::CROSS)
         return;
 
@@ -206,8 +241,10 @@ void FsmCross::setStep(Step st)
     countRec = 0; // AI场景识别计数器
     countSes = 0; // 场次计数器
     timeout = 0;  // 超时计数器
-    params->ctrl.stop = false;
+    // params->ctrl.stop = false; // 保留原代码：stop 属于道闸/停车场，Cross 仅管理 crossStop
     params->ctrl.crossStop = false;
+    if (st == Step::ENABLE)
+        lapCounted = false;
     countCross = 0;
     countStop = 0;
     stopSeen = false;

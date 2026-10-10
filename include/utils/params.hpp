@@ -159,6 +159,8 @@ public:
     FsmMode mode, modeLast;             // FSM状态场景
     shared_ptr<Track> track;            // 赛道识别类
     std::vector<PredictResult> results; // AI推理结果
+    int lapCount = 0;                  // 已完成圈数：仅由起终点停车事件累计
+    bool finishStop = false;            // 第二圈终点停车完成标志
     bool quit = false;                  // 停标触发退出进程标志(主循环检测后先舵机归中再退出)
 private:
 };
