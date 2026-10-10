@@ -120,6 +120,18 @@ private:
   int countIn = 0;                                                // 入库矫正计数器
   vector<vector<PointX>> pointsEdgeLeftPast, pointsEdgeRightPast; // 记录赛道入库车道线
 
+  int countCenter = 0;          // 当帧原始边线连续停正/稳定计数
+  bool parkingPoseValid = false;
+  bool parkingPreviousValid = false;
+  bool parkingEntryTimeout = false;
+  int parkingNearCenter = COLSIMAGE / 2;
+  int parkingFarCenter = COLSIMAGE / 2;
+  int parkingEndRow = 0;
+  int parkingNearLast = COLSIMAGE / 2;
+  int parkingFarLast = COLSIMAGE / 2;
+  int parkingEndLast = 0;
+
+  bool readParkingPose();
   void setStep(Step st);
   void reset();
   void replanTracking();

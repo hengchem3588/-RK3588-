@@ -21,6 +21,7 @@
  */
 
 #include "fsm/park.hpp"
+#include <algorithm>
 
 /**
  * @brief Construct a new Fsm Park
@@ -72,6 +73,10 @@ void FsmPark::run(Mat &img)
     speedUp++;
     if (speedUp > 1000) // 出库缓加速计时
         speedUp = 1000;
+
+    // 此处 Track 已处理当前帧，且 Park 尚未补线；禁止使用上一帧 ctrl.center 判停车。
+    if (step == Step::ENTER || step == Step::PARKING)
+        parkingPoseValid = readParkingPose();
 
     switch (step)
     {
@@ -335,7 +340,7 @@ void FsmPark::run(Mat &img)
         {
             // Track重新捕获正常车道线
             int height = 0;
-            if (params->track->pointsEdgeLeft.size() > COLSIMAGE / 2 && params->track->pointsEdgeRight.size() > COLSIMAGE / 2)
+            if (params->track->pointsEdgeLeft.size() >= 10 && params->track->pointsEdgeRight.size() >= 10)
             {
                 for (int i = 1; i <= 10; i++)
                 {
@@ -345,44 +350,77 @@ void FsmPark::run(Mat &img)
                 height = height / 20;
             }
 
-            if (height > ROWSIMAGE * 0.3) // 入库结束
+            const int tolerance = params->config.parkCenterTolerance;
+            if (parkingPoseValid && height > ROWSIMAGE * 0.3 &&
+                abs(parkingNearCenter - COLSIMAGE / 2) <= tolerance &&
+                abs(parkingFarCenter - COLSIMAGE / 2) <= tolerance &&
+                abs(parkingNearCenter - parkingFarCenter) <= tolerance) // 入库末段图像姿态代理，非四轮物理证明
             {
                 spots.countRes++;
                 if (spots.countRes > 2)
-                    setStep(Step::PARKING); // 停车完成
+                    setStep(Step::PARKING); // 连续3帧末段对齐，当帧停车
             }
+            else
+                spots.countRes = 0;
 
-            // 入库直行
-            params->track->pointsEdgeLeft.clear();  // 清空数据
-            params->track->pointsEdgeRight.clear(); // 清空数据
-            // 左车道线
-            PointX startPoint = PointX(ROWSIMAGE - 30, COLSIMAGE * 0.2);                                    // 入库补线起点:固定左下角
-            PointX endPoint = PointX(50, COLSIMAGE * 0.35);                                                 // 入库补线终点
-            PointX midPoint = PointX((startPoint.x + endPoint.x) * 0.5, (startPoint.y + endPoint.y) * 0.5); // 入库补线中点
-            vector<PointX> repairPoints = {startPoint, midPoint, endPoint};
-            params->track->pointsEdgeLeft = Bezier(0.02, repairPoints); // 三阶贝塞尔曲线拟合
+            if (!parkingPoseValid) // 重捕有效时跟随实测边线，失败时保留原直行补线
+            {
+                // 入库直行
+                params->track->pointsEdgeLeft.clear();  // 清空数据
+                params->track->pointsEdgeRight.clear(); // 清空数据
+                // 左车道线
+                PointX startPoint = PointX(ROWSIMAGE - 30, COLSIMAGE * 0.2);                                    // 入库补线起点:固定左下角
+                PointX endPoint = PointX(50, COLSIMAGE * 0.35);                                                 // 入库补线终点
+                PointX midPoint = PointX((startPoint.x + endPoint.x) * 0.5, (startPoint.y + endPoint.y) * 0.5); // 入库补线中点
+                vector<PointX> repairPoints = {startPoint, midPoint, endPoint};
+                params->track->pointsEdgeLeft = Bezier(0.02, repairPoints); // 三阶贝塞尔曲线拟合
 
-            // 右车道
-            startPoint = PointX(ROWSIMAGE - 30, COLSIMAGE * 0.8);                                    // 入库补线起点:固定左下角
-            endPoint = PointX(50, COLSIMAGE * 0.65);                                                 // 入库补线终点
-            midPoint = PointX((startPoint.x + endPoint.x) * 0.5, (startPoint.y + endPoint.y) * 0.5); // 入库补线中点
-            repairPoints = {startPoint, midPoint, endPoint};
-            params->track->pointsEdgeRight = Bezier(0.02, repairPoints); // 三阶贝塞尔曲线拟合
+                // 右车道
+                startPoint = PointX(ROWSIMAGE - 30, COLSIMAGE * 0.8);                                    // 入库补线起点:固定左下角
+                endPoint = PointX(50, COLSIMAGE * 0.65);                                                 // 入库补线终点
+                midPoint = PointX((startPoint.x + endPoint.x) * 0.5, (startPoint.y + endPoint.y) * 0.5); // 入库补线中点
+                repairPoints = {startPoint, midPoint, endPoint};
+                params->track->pointsEdgeRight = Bezier(0.02, repairPoints); // 三阶贝塞尔曲线拟合
+            }
         }
 
         pointsEdgeLeftPast.push_back(params->track->pointsEdgeLeft); // 记录入库路径
         pointsEdgeRightPast.push_back(params->track->pointsEdgeRight);
 
-        if (timeout > 15)           // 转向超时
-            setStep(Step::PARKING); // 停车完成
+        if (timeout >= params->config.parkEnterMaxFrames) // 允许21帧后的重捕分支执行
+        {
+            parkingEntryTimeout = true;
+            setStep(Step::PARKING); // 入库超时只停车；仍须通过 PARKING 稳定判定才允许出库
+        }
         break;
     }
 
     case Step::PARKING: // 停车
     {
         params->ctrl.stop = true; // 停车标志
-        timeout++;
-        if (timeout > 25)        // 停车计时
+        if (timeout < 60000)
+            timeout++;
+        const int tolerance = params->config.parkCenterTolerance;
+        bool aligned = parkingPoseValid && parkingEndRow > ROWSIMAGE * 0.3 &&
+                       abs(parkingNearCenter - COLSIMAGE / 2) <= tolerance &&
+                       abs(parkingFarCenter - COLSIMAGE / 2) <= tolerance &&
+                       abs(parkingNearCenter - parkingFarCenter) <= tolerance;
+        bool stable = aligned && parkingPreviousValid &&
+                      abs(parkingNearCenter - parkingNearLast) <= 3 &&
+                      abs(parkingFarCenter - parkingFarLast) <= 3 &&
+                      abs(parkingEndRow - parkingEndLast) <= 3;
+        if (stable)
+        {
+            if (countCenter < params->config.parkStableFrames)
+                countCenter++;
+        }
+        else
+            countCenter = 0;
+        parkingPreviousValid = parkingPoseValid;
+        parkingNearLast = parkingNearCenter;
+        parkingFarLast = parkingFarCenter;
+        parkingEndLast = parkingEndRow;
+        if (timeout > 25 && countCenter >= params->config.parkStableFrames) // 保留原停车时长，并要求连续图像稳定
             setStep(Step::EXIT); // 出库
 
         break;
@@ -604,6 +642,15 @@ void FsmPark::show(Mat &img)
         break;
     }
     putText(img, "PARK - " + str, Point(100, 50), cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 0.5);
+    if (step == Step::ENTER || step == Step::PARKING)
+    {
+        putText(img, "Pose:" + to_string(parkingPoseValid) + " N:" + to_string(parkingNearCenter) +
+                     " F:" + to_string(parkingFarCenter), Point(8, 80), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 255, 0), 1);
+        putText(img, "End:" + to_string(parkingEndRow) + " Stable:" + to_string(countCenter) +
+                     "/" + to_string(params->config.parkStableFrames), Point(8, 120), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 255, 0), 1);
+        putText(img, "EntryTimeout:" + to_string(parkingEntryTimeout) + " Hold:" + to_string(timeout),
+                Point(8, 140), cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 255, 0), 1);
+    }
 }
 
 /**
@@ -621,6 +668,10 @@ void FsmPark::reset()
     countIn = 0;       // 入库矫正计数器
     speedUp = 0;       // 出库加速延迟计数器
     countFlow = 0;     // 直行计数器
+    countCenter = 0;
+    parkingPoseValid = false;
+    parkingPreviousValid = false;
+    parkingEntryTimeout = false;
 }
 
 /**
@@ -637,6 +688,61 @@ void FsmPark::setStep(Step st)
     countIn = 0;  // 入库矫正计数器
     countFlow = 0;
     params->ctrl.back = false; // 倒车失能
+    countCenter = 0;
+    parkingPreviousValid = false;
+    if (st == Step::ENTER)
+    {
+        parkingEntryTimeout = false;
+        spots.countRes = 0;
+        params->ctrl.fitting = false;
+    }
+    if (st == Step::PARKING)
+        params->ctrl.stop = true; // 切换帧停车，不能再向前走一帧
+}
+
+// 图像代理只描述可见边线的对齐/稳定，不具备车轮投影和米制标定。
+bool FsmPark::readParkingPose()
+{
+    const auto &left = params->track->pointsEdgeLeft;
+    const auto &right = params->track->pointsEdgeRight;
+    parkingNearCenter = COLSIMAGE / 2;
+    parkingFarCenter = COLSIMAGE / 2;
+    parkingEndRow = 0;
+    if (left.size() < 10 || right.size() < 10 || left.size() != right.size())
+        return false;
+    const int nearRow = ROWSIMAGE * 4 / 5; // 192行
+    const int farRow = ROWSIMAGE * 3 / 5;  // 144行
+    int nearDistance = ROWSIMAGE, farDistance = ROWSIMAGE;
+    for (size_t i = 0; i < left.size(); i++)
+    {
+        if (left[i].x != right[i].x || left[i].x < 0 || left[i].x >= ROWSIMAGE ||
+            left[i].y <= 0 || left[i].y >= COLSIMAGE - 1 ||
+            right[i].y <= 0 || right[i].y >= COLSIMAGE - 1 ||
+            right[i].y - left[i].y < COLSIMAGE / 10)
+            continue; // 不使用贴边、交叉或过窄的边线对
+        int center = (left[i].y + right[i].y) / 2; // PointX.x是行，.y是列
+        int distance = abs(left[i].x - nearRow);
+        if (distance < nearDistance)
+        {
+            nearDistance = distance;
+            parkingNearCenter = center;
+        }
+        distance = abs(left[i].x - farRow);
+        if (distance < farDistance)
+        {
+            farDistance = distance;
+            parkingFarCenter = center;
+        }
+    }
+    int end = 0;
+    for (size_t i = left.size() - 10; i < left.size(); i++)
+    {
+        if (left[i].x != right[i].x || left[i].x < 0 || left[i].x >= ROWSIMAGE)
+            return false;
+        end += left[i].x + right[i].x;
+    }
+    parkingEndRow = end / 20;
+    return nearDistance <= 6 && farDistance <= 6; // 允许步长2采样的近邻误差，不以点数当距离
 }
 
 /**

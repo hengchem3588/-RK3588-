@@ -107,6 +107,9 @@ struct Config
     int binary = -1;                                    // 图像二值化阈值
     string model = "../res/models/yolov3_mobilenet_v1"; // 模型路径
     string video = "../res/samples/sample.mp4";         // 视频路径
+    int parkEnterMaxFrames = 60; // 入库看门狗，30fps下2秒；超时停车，不作为入位成功
+    int parkCenterTolerance = 8; // 近/远两行中点允许偏差(px)，需相机姿态实测
+    int parkStableFrames = 5;    // 连续稳定观测下限，30fps下约0.17秒
     int slowMinFrames = 111; // 原 timeout>110 的退出尺度：111/30=3.7秒，区间长度仍需实测
     NLOHMANN_DEFINE_TYPE_INTRUSIVE(Config, velLow, velHigh, velSlow, velPark, velYFork, velBusy, velStop, velCross,
                                    runP1, runP2, turnP, turnD, debug, saveImg, saveIpm, rowCutUp, rowCutBottom,
@@ -150,6 +153,19 @@ public:
         try
         {
             config = configs.get<Config>();
+            if (configs.contains("parkEnterMaxFrames"))
+                configs.at("parkEnterMaxFrames").get_to(config.parkEnterMaxFrames);
+            if (configs.contains("parkCenterTolerance"))
+                configs.at("parkCenterTolerance").get_to(config.parkCenterTolerance);
+            if (configs.contains("parkStableFrames"))
+                configs.at("parkStableFrames").get_to(config.parkStableFrames);
+            if (config.parkEnterMaxFrames < 21 || config.parkEnterMaxFrames > 60000 ||
+                config.parkCenterTolerance < 1 || config.parkCenterTolerance > COLSIMAGE / 4 ||
+                config.parkStableFrames < 1 || config.parkStableFrames > 60000)
+            {
+                std::cerr << "Invalid parking frame/tolerance configuration" << std::endl;
+                exit(-1);
+            }
             if (configs.contains("slowMinFrames"))
                 configs.at("slowMinFrames").get_to(config.slowMinFrames);
             if (config.slowMinFrames < 1 || config.slowMinFrames > 60000)
