@@ -114,6 +114,16 @@ struct Config
                                    overlap, score, binary, model, video); // 添加构造函数
 };
 
+// 道闸几何观测仅由 FsmStop 使用，不与其他 FSM 交换判定结果。
+struct GateGeometry
+{
+    cv::Rect roi{};              // 停车时横杆参考区域，闭杆确认后冻结
+    bool imageValid = false;    // 当前二值图和 ROI 可用
+    bool barVisible = false;    // 当前区域存在水平对比条带
+    bool closedSeen = false;    // 本次停车曾连续确认闭杆
+    int closedFrames = 0;       // 闭杆连续观测帧数
+};
+
 /**
  * @brief 车辆状态参数（FSM共享传递）
  *
@@ -167,6 +177,7 @@ public:
     FsmMode mode, modeLast;             // FSM状态场景
     shared_ptr<Track> track;            // 赛道识别类
     std::vector<PredictResult> results; // AI推理结果
+    GateGeometry gateGeometry{};      // 道闸当次独立观测状态
     int slowActiveFrames = 0;          // 本次慢行累计帧数，LIMIT 检测不清零
     int lapCount = 0;                  // 已完成圈数：仅由起终点停车事件累计
     bool finishStop = false;            // 第二圈终点停车完成标志

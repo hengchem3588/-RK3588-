@@ -21,6 +21,104 @@
  */
 
 #include "fsm/stop.hpp"
+#include <algorithm>
+
+namespace
+{
+// 黑黄相间横杆在反相二值图中可出现两种极性；检测上下背景相同、条带与背景相反。
+bool hasHorizontalGateBar(const Mat &img, const cv::Rect &roi)
+{
+    for (int radius = 2; radius <= 8; radius += 2)
+    {
+        for (int r = roi.y + radius; r < roi.y + roi.height - radius; r += 2)
+        {
+            const uchar *row = img.ptr<uchar>(r);
+            const uchar *above = img.ptr<uchar>(r - radius);
+            const uchar *below = img.ptr<uchar>(r + radius);
+            int support = 0, samples = 0, first = -1, last = -1;
+            for (int c = roi.x; c < roi.x + roi.width; c += 2)
+            {
+                samples++;
+                if (above[c] == below[c] && row[c] != above[c])
+                {
+                    support++;
+                    if (first < 0)
+                        first = c;
+                    last = c;
+                }
+            }
+            if (samples > 0 && support * 100 >= samples * 45 && last - first >= roi.width / 2)
+                return true; // 至少45%横向样本、跨度至少半个ROI；需按实际横杆图像标定
+        }
+    }
+    return false;
+}
+
+void observeGate(const Mat &img, const vector<PredictResult> &results, GateGeometry &geometry, bool stopped)
+{
+    geometry.imageValid = false;
+    geometry.barVisible = false;
+    if (img.empty() || img.type() != CV_8UC1 || img.cols != COLSIMAGE || img.rows != ROWSIMAGE)
+    {
+        geometry.closedFrames = 0;
+        return;
+    }
+    bool foreground = false, background = false;
+    for (int r = 0; r < img.rows && !(foreground && background); r += 8)
+    {
+        const uchar *row = img.ptr<uchar>(r);
+        for (int c = 0; c < img.cols; c += 8)
+        {
+            foreground = foreground || row[c] == 255;
+            background = background || row[c] == 0;
+        }
+    }
+    if (!foreground || !background) // 全黑/全白图像不能作为抬杆证据
+    {
+        geometry.closedFrames = 0;
+        return;
+    }
+    if (!geometry.closedSeen)
+    {
+        int bottom = -1;
+        for (const auto &result : results)
+        {
+            if (result.type != LABEL_GATE || result.x < 0 || result.x >= img.cols ||
+                result.y < 0 || result.y >= img.rows || result.width <= 0 || result.width > img.cols ||
+                result.height <= 0 || result.height > img.rows)
+                continue;
+            int left = result.x + result.width / 8;
+            int right = std::min(img.cols, result.x + result.width * 7 / 8);
+            int top = std::max(0, result.y - result.height / 8);
+            int end = std::min(img.rows, result.y + result.height + result.height / 8);
+            if (right - left >= COLSIMAGE / 8 && end - top >= 12 && end > bottom)
+            {
+                geometry.roi = cv::Rect(left, top, right - left, end - top);
+                bottom = end;
+            }
+        }
+    }
+    const cv::Rect &roi = geometry.roi;
+    if (roi.width < COLSIMAGE / 8 || roi.height < 12 || roi.x < 0 || roi.y < 0 ||
+        roi.x + roi.width > img.cols || roi.y + roi.height > img.rows)
+        return;
+    geometry.imageValid = true;
+    geometry.barVisible = hasHorizontalGateBar(img, roi);
+    if (stopped)
+    {
+        if (geometry.barVisible)
+        {
+            if (geometry.closedFrames < 3)
+                geometry.closedFrames++;
+            if (geometry.closedFrames >= 3)
+                geometry.closedSeen = true;
+        }
+        else
+            geometry.closedFrames = 0;
+    }
+}
+}
+
 
 /**
  * @brief Construct a new Fsm Park
@@ -65,6 +163,8 @@ void FsmStop::run(Mat &img)
 
     polyRoad.clear();
     polyCar.clear();
+    if (step == Step::ENABLE || step == Step::STOP)
+        observeGate(img, params->results, params->gateGeometry, step == Step::STOP);
 
     switch (step)
     {
@@ -128,6 +228,9 @@ void FsmStop::run(Mat &img)
                 break;
             }
         }
+        // 标签消失且参考ROI中横杆消失才累计；标签仍在/横杆仍在/图像无效均清零。
+        if (!params->gateGeometry.closedSeen || !params->gateGeometry.imageValid || params->gateGeometry.barVisible)
+            countSes = 0;
         if (countSes >= 20)
         {
             setStep(Step::NONE); // 设置新状态
@@ -146,7 +249,7 @@ void FsmStop::run(Mat &img)
  */
 void FsmStop::show(Mat &img)
 {
-    if (params->mode != FsmMode::STOP)
+    if (step == Step::NONE || !params->config.stop)
         return;
 
     putText(img, "[7] Stop", Point(COLSIMAGE / 2 - 50, 20),
@@ -162,6 +265,14 @@ void FsmStop::show(Mat &img)
         putText(img, "[7] STOP - STOPING", Point(100, 50), cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 0, 255), 0.5);
         break;
     }
+
+    if (params->gateGeometry.roi.width > 0)
+        rectangle(img, params->gateGeometry.roi, cv::Scalar(255, 255, 0), 1);
+    putText(img, "Gate V:" + to_string(params->gateGeometry.imageValid) +
+                 " B:" + to_string(params->gateGeometry.barVisible) +
+                 " Seen:" + to_string(params->gateGeometry.closedSeen) +
+                 " Clear:" + to_string(countSes) + "/20", Point(8, 100),
+            cv::FONT_HERSHEY_PLAIN, 1, cv::Scalar(0, 255, 0), 1);
 
     if (polyRoad.size() > 0 && polyCar.size() > 0)
     {
@@ -314,4 +425,8 @@ void FsmStop::setStep(Step st)
     countRec = 0; // AI场景识别计数器
     countSes = 0; // 场次计数器
     timeout = 0;  // 超时计数器
+    if (st == Step::NONE)
+        params->gateGeometry = GateGeometry{};
+    if (st == Step::STOP)
+        params->ctrl.stop = true; // 切换到停车的当帧立即停止
 }
