@@ -69,7 +69,7 @@ void FsmCross::run(Mat &img)
     else if (countInit < 60)
         return;
 
-    // 离开同一起终点后才重新允许计圈；短暂丢框不能解除重复计数屏蔽。
+    // 用持续前行指令和标志消失作为离开代理；短暂或原地丢框不解除计圈屏蔽。
     if (step == Step::NONE && !lapArmed)
     {
         bool startFinishSeen = false;
@@ -81,7 +81,8 @@ void FsmCross::run(Mat &img)
                 break;
             }
         }
-        if (startFinishSeen)
+        if (startFinishSeen || params->ctrl.stop || params->ctrl.crossStop || params->ctrl.back ||
+            !(params->ctrl.speed > 0.0f)) // 无实测里程；至少要求前行指令连续有效
             countLapClear = 0;
         else if (countLapClear < 60)
             countLapClear++;
