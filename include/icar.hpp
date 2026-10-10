@@ -36,6 +36,11 @@
 #include "ctrl/predeal.hpp"
 #include "ctrl/center.hpp"
 #include "ctrl/motion.hpp"
+#include <dirent.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#include <limits.h>
+#include <cctype>
 
 using namespace std;
 using namespace cv;
@@ -229,7 +234,56 @@ public:
             capture = make_shared<cv::VideoCapture>("/dev/video0"); // 打开摄像头
         if (!capture->isOpened())
         {
-            printf("[Error]: Can not open video device!!!\n");
+            if (params->config.debug)
+            {
+                char cwd[PATH_MAX] = {};
+                const bool cwdValid = getcwd(cwd, sizeof(cwd)) != nullptr;
+                std::string videoPath = params->config.video;
+                std::string samplesPath = "../res/samples";
+                if (cwdValid)
+                {
+                    if (videoPath.empty() || videoPath.front() != '/')
+                        videoPath = std::string(cwd) + "/" + videoPath;
+                    samplesPath = std::string(cwd) + "/" + samplesPath;
+                }
+                else
+                    perror("[Error]: getcwd failed; paths below are relative");
+                std::cerr << "[Error]: Can not open debug video: " << videoPath << std::endl;
+                std::cerr << "可用视频候选（可读普通文件，解码支持以 OpenCV 为准）：" << samplesPath << std::endl;
+                DIR *directory = opendir(samplesPath.c_str());
+                if (!directory)
+                    perror("[Error]: Can not list res/samples");
+                else
+                {
+                    const std::vector<std::string> extensions = {".mp4", ".avi", ".mov", ".mkv", ".m4v", ".mpg", ".mpeg", ".wmv", ".webm", ".ts", ".mts", ".m2ts", ".mjpeg", ".h264", ".h265"};
+                    bool foundVideo = false;
+                    while (struct dirent *entry = readdir(directory))
+                    {
+                        std::string filename = entry->d_name;
+                        const auto dot = filename.find_last_of('.');
+                        if (dot == std::string::npos)
+                            continue;
+                        std::string extension = filename.substr(dot);
+                        std::transform(extension.begin(), extension.end(), extension.begin(), [](unsigned char ch)
+                                       { return static_cast<char>(std::tolower(ch)); });
+                        if (std::find(extensions.begin(), extensions.end(), extension) == extensions.end())
+                            continue;
+                        const std::string availablePath = samplesPath + "/" + filename;
+                        struct stat fileInfo = {};
+                        if (stat(availablePath.c_str(), &fileInfo) == 0 && S_ISREG(fileInfo.st_mode) && access(availablePath.c_str(), R_OK) == 0)
+                        {
+                            std::cerr << "  " << availablePath << std::endl;
+                            foundVideo = true;
+                        }
+                    }
+                    closedir(directory);
+                    if (!foundVideo)
+                        std::cerr << "  未找到可读的视频候选文件" << std::endl;
+                }
+                std::cerr << "请把 config.json 的 video 指向其中之一" << std::endl;
+            }
+            else
+                printf("[Error]: Can not open video device!!!\n");
             exit(-1);
         }
         capture->set(cv::CAP_PROP_FRAME_WIDTH, COLSCAMERA);  // 设置图像分辨率

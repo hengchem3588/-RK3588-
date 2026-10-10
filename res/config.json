@@ -31,7 +31,7 @@
     "score": 0.2,
     "binary": -1,
     "model": "../res/models/yolov3_mobilenet_v1",
-    "video": "../res/samples/sample.mp4",
+    "video": "../res/samples/fine.mp4",
     "record": [
         {
             "#velLow": "智能车最低速度: 1.0m/s",
@@ -66,7 +66,8 @@
             "#score": "AI检测置信度[0,1]",
             "#binary": "二值化阈值[0,255], <0 默认使用大津法",
             "#model": "AI模型路径(../res/models/yolov3_mobilenet_v1)",
-            "#video": "视频路径(../res/samples/sample.mp4)"
+            "#video": "视频路径(../res/samples/fine.mp4)",
+            "#park.mp4": "停车场专项回放：../res/samples/park.mp4，需要时修改 video 切换"
         }
     ]
 }
