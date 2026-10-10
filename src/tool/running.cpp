@@ -41,6 +41,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <cctype>
+#include <algorithm>
 #include <fstream>
 #include <sys/types.h>
 #include <sys/wait.h>

@@ -41,6 +41,7 @@
 #include <unistd.h>
 #include <limits.h>
 #include <cctype>
+#include <algorithm>
 
 using namespace std;
 using namespace cv;
