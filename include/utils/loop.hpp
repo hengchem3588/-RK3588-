@@ -38,6 +38,8 @@ public:
     Loops(const std::string &name, double period, std::function<void()> func, int bindCPU = -1)
         : _name(name), _period(period), _func(func), _bindCPU(bindCPU), _running(false) {}
 
+    ~Loops() { shutdown(); }
+
     void start()
     {
         _running = true;
@@ -51,7 +53,6 @@ public:
         {
             _thread = std::thread(&Loops::loop, this);
         }
-        _thread.detach();
     }
 
     void shutdown()

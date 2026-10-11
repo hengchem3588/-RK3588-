@@ -1,8 +1,10 @@
 {
-    "velLow": 0.8,
+    "velLow": 0.6,
     "velHigh": 0.8,
     "velSlow": 0.40,
     "slowMinFrames": 111,
+    "aiStartupTimeoutMs": 5000,
+    "aiResultMaxAgeMs": 1000,
     "velPark": 0.6,
     "velBusy": 0.6,
     "velStop": 0.7,

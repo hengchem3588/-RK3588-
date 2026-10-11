@@ -26,6 +26,7 @@
 #include <unistd.h>
 #include <cmath>
 #include <fstream>
+#include <stdexcept>
 #include "utils/json.hpp"
 #include "ctrl/track.hpp"
 
@@ -63,10 +64,12 @@ struct Control
     float speed = 0.0;            // 发送给电机的速度
     int center = COLSIMAGE / 2;   // 控制中心
     vector<PointX> centerEdge;    // 赛道中心点集
-    int lineArea = 0;             // 面积规划行序号
+    int lineArea = 0;             // 有效前向行跨度：240-最远有效行，失败为0
+    double steerFF = 0.0;
+    double speedLimit = 0.0;
     bool fitting = false;         // 控制中心拟合标志(停车场专用)
     bool parking = false;         // 停车场特殊模式
-    int countAcc = 500;           // 缓加速计数器
+    int countAcc = 0;             // 起步低速保持帧数，不是速度爬升计算
 };
 /**
  * @brief 控制器核心参数
@@ -106,7 +109,9 @@ struct Config
     float score = 0.5;                                  // AI检测置信度
     int binary = -1;                                    // 图像二值化阈值
     string model = "../res/models/yolov3_mobilenet_v1"; // 模型路径
-    string video = "../res/samples/sample.mp4";         // 视频路径
+    string video = "../res/samples/fine.mp4";           // 视频路径
+    int aiStartupTimeoutMs = 5000;
+    int aiResultMaxAgeMs = 1000;
     int parkEnterMaxFrames = 60; // 入库看门狗，30fps下2秒；超时停车，不作为入位成功
     int parkCenterTolerance = 8; // 近/远两行中点允许偏差(px)，需相机姿态实测
     int parkStableFrames = 5;    // 连续稳定观测下限，30fps下约0.17秒
@@ -149,10 +154,28 @@ public:
             exit(-1);
         }
         nlohmann::json configs;
-        fileStr >> configs;
         try
         {
+            fileStr >> configs;
             config = configs.get<Config>();
+            if (configs.contains("aiStartupTimeoutMs"))
+                configs.at("aiStartupTimeoutMs").get_to(config.aiStartupTimeoutMs);
+            if (configs.contains("aiResultMaxAgeMs"))
+                configs.at("aiResultMaxAgeMs").get_to(config.aiResultMaxAgeMs);
+            if (config.aiStartupTimeoutMs < 1 || config.aiStartupTimeoutMs > 60000 ||
+                config.aiResultMaxAgeMs < 1 || config.aiResultMaxAgeMs > 60000)
+                throw std::runtime_error("AI timeout must be in [1,60000] ms");
+            const float speeds[] = {config.velLow, config.velHigh, config.velSlow, config.velPark,
+                                    config.velBusy, config.velStop, config.velCross, config.velYFork};
+            for (float speed : speeds)
+                if (!std::isfinite(speed) || speed < 0.0f)
+                    throw std::runtime_error("Speed must be finite and nonnegative");
+            if (config.velLow > config.velHigh || (config.slow && config.velSlow >= 0.5f))
+                throw std::runtime_error("Require velLow<=velHigh and velSlow<0.5 when slow is enabled");
+            if (!std::isfinite(config.runP1) || !std::isfinite(config.runP2) ||
+                !std::isfinite(config.turnP) || !std::isfinite(config.turnD) ||
+                config.runP1 < 0.0f || config.runP2 < 0.0f || config.turnP < 0.0f || config.turnD < 0.0f)
+                throw std::runtime_error("PD gains must be finite and nonnegative");
             if (configs.contains("parkEnterMaxFrames"))
                 configs.at("parkEnterMaxFrames").get_to(config.parkEnterMaxFrames);
             if (configs.contains("parkCenterTolerance"))
@@ -174,7 +197,7 @@ public:
                 exit(-1);
             }
         }
-        catch (const nlohmann::detail::exception &e)
+        catch (const std::exception &e)
         {
             std::cerr << "Json Params Parse failed :" << e.what() << std::endl;
             exit(-1);

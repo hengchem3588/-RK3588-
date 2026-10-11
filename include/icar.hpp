@@ -84,6 +84,12 @@ private:
     std::condition_variable cvImg;
     std::atomic<bool> readyImg{false};
     std::mutex mtxRes;
+    std::condition_variable cvRes;
+    std::atomic<bool> stoppingAI{false};
+    bool aiHasResult = false;
+    bool aiFailed = false;
+    std::chrono::steady_clock::time_point imageTime{};
+    std::chrono::steady_clock::time_point resultTime{};
     std::vector<PredictResult> resultsShare{}; // mtxRes 保护的最新完整推理结果
     std::atomic<bool> readyRes{false}; // 已废弃：无消费者，保留声明与原写入
 
@@ -130,16 +136,31 @@ private:
     {
         std::unique_lock<std::mutex> lock(mtxImg);
         cvImg.wait(lock, [this]
-                   { return readyImg.load(); });
+                   { return readyImg.load() || stoppingAI.load(); });
+        if (stoppingAI.load())
+            return;
         cv::Mat img = imgShare.clone(); // 图像拷贝出来再释放锁
+        const auto sourceTime = imageTime;
         readyImg = false;
         lock.unlock();
 
         // 启动AI推理
-        detection->inference(img);
-        std::lock_guard<std::mutex> lock_result(mtxRes);
-        resultsShare = detection->results; // AI 只发布结果，不写主线程帧快照
-        readyRes = true;
+        try
+        {
+            detection->inference(img);
+            std::lock_guard<std::mutex> lock_result(mtxRes);
+            resultsShare = detection->results;
+            resultTime = sourceTime;
+            aiHasResult = true;
+            readyRes = true;
+        }
+        catch (const std::exception &error)
+        {
+            std::cerr << "[Error]: AI inference failed: " << error.what() << std::endl;
+            std::lock_guard<std::mutex> lock_result(mtxRes);
+            aiFailed = true;
+        }
+        cvRes.notify_one();
     }
 
     /**
@@ -311,11 +332,21 @@ public:
 
         // 启动AI推理子线程
         loops = make_shared<Loops>("LoopAI", 1.f / 30.f, std::bind(&Icar::runModel, this));
-        loops->start(); // RL开始推理
+        if (!params->config.debug)
+            loops->start(); // RL开始推理
 
         printf("[OK]: Params initial succeed!!!\n");
     };
-    ~Icar() {};
+    ~Icar()
+    {
+        {
+            std::lock_guard<std::mutex> lock(mtxImg);
+            stoppingAI = true;
+        }
+        cvImg.notify_all();
+        if (loops)
+            loops->shutdown();
+    };
 
     /**
      * @brief 程序主循环
@@ -332,6 +363,7 @@ public:
                 if (client->keypress)
                 {
                     client->buzzerSound(client->BUZZER_FINISH); // 祖传提示音效
+                    client->carControl(0, PWMSERVOMID);
                     printf("-----> System Exit!!! <-----\n");
                     exit(0); // 程序退出
                 }
@@ -346,12 +378,24 @@ public:
                 return;
             show->indexLast = show->index;
         }
-        else if (!capture->read(img))
+        else if (!capture->read(img) || img.empty())
+        {
+            client->carControl(0, PWMSERVOMID);
+            std::cerr << "[Error]: Camera frame lost, stopped." << std::endl;
+            params->quit = true;
+            exit(-1);
             return;
+        }
+        const auto frameTime = std::chrono::steady_clock::now();
+        if (img.size() != cv::Size(COLSIMAGE, ROWSIMAGE))
+            cv::resize(img, img, cv::Size(COLSIMAGE, ROWSIMAGE));
 
         // 帧首快照：本帧 FSM 与绘图共用，后续不再更新
+        bool firstInference = false;
+        if (!params->config.debug)
         {
             std::lock_guard<std::mutex> lock_result(mtxRes);
+            firstInference = !aiHasResult;
             params->results = resultsShare;
         }
 
@@ -365,18 +409,44 @@ public:
         cv::Mat imgBin;
         predeal->correction(img); // 图像矫正
         /*---------------子线程共享数据，避免浅拷贝-----------------*/
+        if (params->config.debug)
+        {
+            detection->inference(img);
+            params->results = detection->results;
+        }
+        else
         {
             // 锁只保护共享缓冲的交接，不要扩大作用域
             std::lock_guard<std::mutex> lock(mtxImg);
             imgShare = img.clone();
+            imageTime = frameTime;
             readyImg = true;
             cvImg.notify_one();
         }
         /*-------------------------------------------------------*/
+        if (!params->config.debug)
+        {
+            std::unique_lock<std::mutex> lock_result(mtxRes);
+            if (!aiHasResult && !aiFailed)
+                cvRes.wait_for(lock_result, std::chrono::milliseconds(params->config.aiStartupTimeoutMs),
+                               [this] { return aiHasResult || aiFailed; });
+            if (!aiHasResult || aiFailed ||
+                std::chrono::steady_clock::now() - resultTime >
+                    std::chrono::milliseconds(params->config.aiResultMaxAgeMs))
+            {
+                client->carControl(0, PWMSERVOMID);
+                std::cerr << "[Error]: AI startup/result timeout, stopped." << std::endl;
+                params->quit = true;
+                exit(-1);
+            }
+            if (firstInference)
+                params->results = resultsShare;
+        }
         imgBin = predeal->binaryzation(img); // 图像二值化
 
         //[04] 赛道识别
         params->track->handle(imgBin);
+        params->ctrl.lineArea = params->track->lineArea;
         if (params->config.debug)
         {
             show->setNewWindow(1, "Bin", imgBin);

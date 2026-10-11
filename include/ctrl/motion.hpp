@@ -39,8 +39,19 @@ public:
      */
     void poseControl(shared_ptr<Params> &params)
     {
+        if (params->quit)
+        {
+            params->ctrl.servo = PWMSERVOMID;
+            errorLast = 0;
+            return;
+        }
         float error = params->ctrl.center - COLSIMAGE / 2; // 图像控制中心转换偏差
-        static int errorLast = 0;                          // 记录前一次的偏差
+        if (params->mode != modeLast || params->ctrl.back != backLast)
+        {
+            errorLast = static_cast<int>(error);
+            modeLast = params->mode;
+            backLast = params->ctrl.back;
+        }
         if (params->mode == FsmMode::YFORK)                // yfork单边：立即跟随center，不被上一帧偏差限速拖反
             errorLast = (int)error;
         else if (abs(error - errorLast) > COLSIMAGE / 20)  // 普通跟线：限速防猛打方向
@@ -49,14 +60,17 @@ public:
                                       : errorLast - COLSIMAGE / 10;
         }
 
-        params->config.turnP = abs(error) * params->config.runP2 + params->config.runP1;
-        int pwmDiff = (error * params->config.turnP) + (error - errorLast) * params->config.turnD;
+        const float turnP = std::min(params->config.turnP,
+                                    abs(error) * params->config.runP2 + params->config.runP1);
+        double pwmDiff = (error * turnP) + (error - errorLast) * params->config.turnD;
+        if (std::isfinite(params->ctrl.steerFF) && !params->ctrl.back &&
+            !params->ctrl.stop && !params->ctrl.crossStop)
+            pwmDiff += params->ctrl.steerFF;
         errorLast = error;
-        params->ctrl.servo = (uint16_t)(PWMSERVOMID + pwmDiff); // PWM转换
-        if (params->ctrl.servo > PWMSERVOMAX)
-            params->ctrl.servo = PWMSERVOMAX;
-        else if (params->ctrl.servo < PWMSERVOMIN)
-            params->ctrl.servo = PWMSERVOMIN;
+        if (!std::isfinite(pwmDiff))
+            pwmDiff = 0.0;
+        params->ctrl.servo = static_cast<uint16_t>(std::clamp(PWMSERVOMID + pwmDiff,
+                                                           double(PWMSERVOMIN), double(PWMSERVOMAX)));
     }
 
     /**
@@ -66,7 +80,7 @@ public:
      */
     void speedControl(shared_ptr<Params> &params)
     {
-        if (params->ctrl.stop) // 停车
+        if (params->ctrl.stop || params->quit) // 停车
         {
             params->ctrl.speed = 0.0;
             return;
@@ -85,57 +99,42 @@ public:
         if (params->ctrl.slow) // 减速区速度
         {
             params->ctrl.speed = params->config.velSlow;
-            return;
         }
-        if (params->mode == FsmMode::STOP) // 停车区速度
+        else if (params->mode == FsmMode::STOP) // 停车区速度
         {
             params->ctrl.speed = params->config.velStop;
-            return;
         }
         else if (params->mode == FsmMode::PARK) // 停车场速度
         {
             params->ctrl.speed = params->config.velPark;
-            return;
         }
         else if (params->mode == FsmMode::CROSS) // 斑马线速度
         {
             params->ctrl.speed = params->config.velCross;
-            return;
         }
         else if (params->mode == FsmMode::BUSY) // 施工区速度
         {
             params->ctrl.speed = params->config.velBusy;
-            return;
         }
         else if (params->mode == FsmMode::YFORK) // 岔路口速度
         {
             params->ctrl.speed = params->config.velYFork;
-            return;
         }
 
         else if (params->ctrl.countAcc < 50)
         {
             params->ctrl.countAcc++;
-            params->ctrl.speed = params->config.velCross;
-            return;
+            params->ctrl.speed = std::min(params->config.velCross, params->config.velLow);
         }
-
-        int line = params->ctrl.lineArea; // 动态速度，返回点越高，速度越大，线性变化
-
-        // 控制率
-        uint8_t controlLow = 3;   // 速度控制下限
-        uint8_t controlMid = 5;   // 控制率
-        uint8_t controlHigh = 10; // 速度控制上限
-
-        float upper = ROWSIMAGE * 0.35; // 84
-        line = std::max(line - 20, 0);
-        if (line > upper)
-            line = upper;
-
-        params->ctrl.speed = params->config.velLow +
-                             std::pow(float(upper - line) / (upper), 3) * (params->config.velHigh - params->config.velLow);
-        if (params->ctrl.speed > params->config.velHigh)
-            params->ctrl.speed = params->config.velHigh;
+        else
+        {
+            const float upper = std::max(1, ROWSIMAGE - 1 - int(params->track->rowCutUp));
+            const float line = std::clamp(float(params->ctrl.lineArea), 0.0f, upper);
+            params->ctrl.speed = params->config.velLow +
+                std::pow(line / upper, 3) * (params->config.velHigh - params->config.velLow);
+        }
+        if (std::isfinite(params->ctrl.speedLimit) && params->ctrl.speedLimit > 0.0)
+            params->ctrl.speed = std::min(params->ctrl.speed, float(params->ctrl.speedLimit));
     }
 
     /**
@@ -191,6 +190,9 @@ public:
     }
 
 private:
+    int errorLast = 0;
+    FsmMode modeLast = FsmMode::NORMAL;
+    bool backLast = false;
     int countRes = 0;
     int countOut = 0;
     bool outline = false; // 出线标志
