@@ -53,8 +53,10 @@ void Center::fitting(shared_ptr<Params> &params)
              validRowsCal(params->track->pointsEdgeLeft,
                           params->track->pointsEdgeRight);
         
-             params->track->pointsEdgeLeft.resize(validRowsLeft);
-             params->track->pointsEdgeRight.resize(validRowsRight);
+             if (validRowsLeft > 0)
+                 params->track->pointsEdgeLeft.resize(std::min<size_t>(validRowsLeft, params->track->pointsEdgeLeft.size()));
+             if (validRowsRight > 0)
+                 params->track->pointsEdgeRight.resize(std::min<size_t>(validRowsRight, params->track->pointsEdgeRight.size()));
          }
 
 
@@ -163,11 +165,15 @@ void Center::fitting(shared_ptr<Params> &params)
     {
         params->ctrl.center = params->ctrl.center / controlNum;
     }
+    else
+        params->ctrl.center = lastCenter;
 
     if (params->ctrl.center > COLSIMAGE)
         params->ctrl.center = COLSIMAGE;
     else if (params->ctrl.center < 0)
         params->ctrl.center = 0;
+    if (!params->ctrl.centerEdge.empty())
+        lastCenter = params->ctrl.center;
 
     // 控制率计算
     if (params->ctrl.centerEdge.size() > 20)
@@ -186,7 +192,7 @@ void Center::fitting(shared_ptr<Params> &params)
 
     // 车辆冲出赛道检测
     if (!params->ctrl.parking)
-        derailmentCheck(params->track->pointsEdgeLeft, params->track->pointsEdgeRight);
+        derailmentCheck(params);
 }
 
 /**
@@ -347,6 +353,8 @@ uint16_t Center::searchBreakRightDown(vector<PointX> pointsEdgeRight)
  */
 vector<PointX> Center::centerCompute(vector<PointX> pointsEdge, int side)
 {
+    if (pointsEdge.empty())
+        return {};
     int step = 4;                    // 间隔尺度
     int offsetWidth = COLSIMAGE / 2; // 首行偏移量
     int offsetHeight = 0;            // 纵向偏移量
@@ -534,8 +542,10 @@ void Center::validRowsCal(vector<PointX> pointsEdgeLeft, vector<PointX> pointsEd
  * @return true
  * @return false
  */
-void Center::derailmentCheck(vector<PointX> pointsEdgeLeft, vector<PointX> pointsEdgeRight)
+void Center::derailmentCheck(shared_ptr<Params> &params)
 {
+    const auto &pointsEdgeLeft = params->track->pointsEdgeLeft;
+    const auto &pointsEdgeRight = params->track->pointsEdgeRight;
     if (pointsEdgeLeft.size() < 30 && pointsEdgeRight.size() < 30) // 防止车辆冲出赛道
     {
         countOut++;
@@ -543,7 +553,10 @@ void Center::derailmentCheck(vector<PointX> pointsEdgeLeft, vector<PointX> point
         if (countOut > 20)
         {
             printf("-----> ICAR Outline!!! <-----\n");
-            exit(0); // 程序退出
+            params->ctrl.stop = true;
+            params->ctrl.speed = 0.0f;
+            params->ctrl.servo = PWMSERVOMID;
+            params->quit = true;
         }
     }
     else

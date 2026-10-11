@@ -35,16 +35,18 @@ public:
     vector<PointX> pointsEdgeRight; // 赛道右边缘点集
     vector<PointX> widthBlock;      // 色块宽度=终-起（每行）
     vector<PointX> spurroad;        // 保存岔路信息
-    double stdevLeft;               // 边缘斜率方差（左）
-    double stdevRight;              // 边缘斜率方差（右）
+    double stdevLeft = 1000;        // 边缘斜率方差（左）
+    double stdevRight = 1000;       // 边缘斜率方差（右）
     int validRowsLeft = 0;          // 边缘有效行数（左）
     int validRowsRight = 0;         // 边缘有效行数（右）
     uint16_t rowCutUp = 1;          // 图像顶部切行
     uint16_t rowCutBottom = 20;     // 图像底部切行
+    int lineArea = 0;
 
     void handle(Mat img);
     void handle(bool isResearch, uint16_t rowStart);
     void drawImage(Mat &img);
+    void synchronizeEdges();
     double stdevEdgeCal(vector<PointX> &v_edge, int img_height);
 
 private:

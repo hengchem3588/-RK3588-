@@ -171,6 +171,9 @@ PredictResult FsmObstacle::findTarget()
  */
 void FsmObstacle::planObstacle(PredictResult obs)
 {
+    params->track->synchronizeEdges();
+    if (params->track->pointsEdgeLeft.empty() || obs.width <= 0 || obs.height <= 0)
+        return;
     // 障碍物方向判定（左/右）
     int row = 0, width = COLSIMAGE;
     for (size_t i = 0; i < params->track->pointsEdgeLeft.size(); i++)
@@ -210,10 +213,17 @@ void FsmObstacle::planObstacle(PredictResult obs)
             else
                 points[3] = {obs.y, obs.x + obs.width * 1};
 
-            params->track->pointsEdgeLeft.resize((size_t)row / 2); // 删除错误路线
             vector<PointX> repair = Bezier(0.01, points);          // 重新规划车道线
-            for (int i = 0; i < repair.size(); i++)
-                params->track->pointsEdgeLeft.push_back(repair[i]);
+            for (size_t index = static_cast<size_t>(row) / 2;
+                 index < params->track->pointsEdgeLeft.size() && !repair.empty(); ++index)
+            {
+                const int targetRow = params->track->pointsEdgeLeft[index].x;
+                const auto nearest = std::min_element(repair.begin(), repair.end(),
+                    [targetRow](const PointX &first, const PointX &second)
+                    { return std::abs(first.x - targetRow) < std::abs(second.x - targetRow); });
+                params->track->pointsEdgeLeft[index].y = std::clamp(nearest->y, 0,
+                    params->track->pointsEdgeRight[index].y);
+            }
         }
     }
     else if (obs.x + obs.width > params->track->pointsEdgeLeft[row].y &&
@@ -233,16 +243,24 @@ void FsmObstacle::planObstacle(PredictResult obs)
             else
                 points[3] = {obs.y, obs.x - obs.width * 2};
 
-            params->track->pointsEdgeRight.resize((size_t)row / 2); // 删除错误路线
             vector<PointX> repair = Bezier(0.01, points);           // 重新规划车道线
-            for (int i = 0; i < repair.size(); i++)
-                params->track->pointsEdgeRight.push_back(repair[i]);
+            for (size_t index = static_cast<size_t>(row) / 2;
+                 index < params->track->pointsEdgeRight.size() && !repair.empty(); ++index)
+            {
+                const int targetRow = params->track->pointsEdgeRight[index].x;
+                const auto nearest = std::min_element(repair.begin(), repair.end(),
+                    [targetRow](const PointX &first, const PointX &second)
+                    { return std::abs(first.x - targetRow) < std::abs(second.x - targetRow); });
+                params->track->pointsEdgeRight[index].y = std::clamp(nearest->y,
+                    params->track->pointsEdgeLeft[index].y, COLSIMAGE - 1);
+            }
         }
     }
 
     // 车道线切除顶行，避免弯道权重过大
     params->track->pointsEdgeLeft.resize((size_t)(params->track->pointsEdgeLeft.size() * 0.8));
     params->track->pointsEdgeRight.resize((size_t)(params->track->pointsEdgeRight.size() * 0.8));
+    params->track->synchronizeEdges();
 }
 
 /**
@@ -252,6 +270,7 @@ void FsmObstacle::planObstacle(PredictResult obs)
  */
 void FsmObstacle::curtailTracking(bool left)
 {
+    params->track->synchronizeEdges();
     if (left) // 向左侧缩进
     {
         if (params->track->pointsEdgeRight.size() > params->track->pointsEdgeLeft.size())
@@ -272,4 +291,5 @@ void FsmObstacle::curtailTracking(bool left)
             params->track->pointsEdgeLeft[i].y = (params->track->pointsEdgeRight[i].y + params->track->pointsEdgeLeft[i].y) / 2;
         }
     }
+    params->track->synchronizeEdges();
 }

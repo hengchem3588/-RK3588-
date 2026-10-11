@@ -46,12 +46,14 @@ void Track::handle(bool isResearch, uint16_t rowStart)
 {
     bool flagStartBlock = true;                    // 搜索到色块起始行的标志（行）
     int counterSearchRows = pointsEdgeLeft.size(); // 搜索行计数
-    int startBlock[30];                            // 色块起点（行）
-    int endBlock[30];                              // 色块终点（行）
+    int startBlock[30] = {};                       // 色块起点（行）
+    int endBlock[30] = {};                         // 色块终点（行）
     int counterBlock = 0;                          // 色块计数器（行）
     PointX pointSpurroad;                          // 岔路坐标
     int counterSpurroad = 0;                       // 岔路识别标志
     bool spurroadEnable = false;
+    lineArea = 0;
+    stdevLeft = stdevRight = 1000;
 
     if (rowCutUp > ROWSIMAGE / 4)
         rowCutUp = ROWSIMAGE / 4;
@@ -67,44 +69,49 @@ void Track::handle(bool isResearch, uint16_t rowStart)
         validRowsLeft = 0;                   // 边缘有效行数（左）
         validRowsRight = 0;                  // 边缘有效行数（右）
         flagStartBlock = true;               // 搜索到色块起始行的标志（行）
-        rowStart = ROWSIMAGE - 1;
+        rowStart = ROWSIMAGE - 1 - rowCutBottom;
     }
     else
     {
-        if (pointsEdgeLeft.size() > rowStart)
-            pointsEdgeLeft.resize(rowStart);
-        if (pointsEdgeRight.size() > rowStart)
-            pointsEdgeRight.resize(rowStart);
-        if (widthBlock.size() > rowStart)
-        {
-            widthBlock.resize(rowStart);
-            if (rowStart > 1)
-                rowStart = widthBlock[rowStart - 1].x - 2;
-        }
-
-        flagStartBlock = false; // 搜索到色块起始行的标志（行）
+        synchronizeEdges();
+        const size_t retained = std::min(static_cast<size_t>(rowStart), widthBlock.size());
+        pointsEdgeLeft.resize(retained);
+        pointsEdgeRight.resize(retained);
+        widthBlock.resize(retained);
+        rowStart = retained > 0 ? std::max(0, widthBlock.back().x - 2)
+                                : ROWSIMAGE - 1 - rowCutBottom;
+        flagStartBlock = retained == 0; // 搜索到色块起始行的标志（行）
     }
+
+    if (imgShare.empty() || imgShare.type() != CV_8UC1 ||
+        imgShare.rows != ROWSIMAGE || imgShare.cols != COLSIMAGE)
+    {
+        pointsEdgeLeft.clear();
+        pointsEdgeRight.clear();
+        widthBlock.clear();
+        return;
+    }
+    rowStart = std::min<int>(rowStart, ROWSIMAGE - 1 - rowCutBottom);
 
     //  开始识别赛道左右边缘
     for (int row = rowStart; row > rowCutUp; row-=2) // 有效行：10~220
     {
+        const uchar *pixels = imgShare.ptr<uchar>(row);
         counterBlock = 0; // 色块计数器清空
                           // 搜索色（block）块信息
-        if (imgShare.at<uchar>(row, 0) > 127)
+        if (pixels[0] > 127)
         {
             startBlock[counterBlock] = 0;
         }
         for (int col = 1; col < COLSIMAGE; col++) // 搜索出每行的所有色块
         {
-            if (imgShare.at<uchar>(row, col) > 127 &&
-                imgShare.at<uchar>(row, col - 1) <= 127)
+            if (pixels[col] > 127 && pixels[col - 1] <= 127)
             {
                 startBlock[counterBlock] = col;
             }
             else
             {
-                if (imgShare.at<uchar>(row, col) <= 127 &&
-                    imgShare.at<uchar>(row, col - 1) > 127)
+                if (pixels[col] <= 127 && pixels[col - 1] > 127)
                 {
                     endBlock[counterBlock++] = col;
                     if (counterBlock >= end(endBlock) - begin(endBlock))
@@ -112,10 +119,17 @@ void Track::handle(bool isResearch, uint16_t rowStart)
                 }
             }
         }
-        if (imgShare.at<uchar>(row, COLSIMAGE - 1) > 127)
+        if (pixels[COLSIMAGE - 1] > 127)
         {
-            if (counterBlock < end(endBlock) - begin(endBlock) - 1)
+            if (counterBlock < end(endBlock) - begin(endBlock))
                 endBlock[counterBlock++] = COLSIMAGE - 1;
+        }
+
+        if (counterBlock == 0)
+        {
+            if (flagStartBlock && row >= ROWSIMAGE / 3)
+                continue;
+            break;
         }
 
         int widthBlocks = endBlock[0] - startBlock[0]; // 色块宽度临时变量
@@ -263,7 +277,21 @@ void Track::handle(bool isResearch, uint16_t rowStart)
 
     stdevLeft = stdevEdgeCal(pointsEdgeLeft, ROWSIMAGE); // 计算边缘方差
     stdevRight = stdevEdgeCal(pointsEdgeRight, ROWSIMAGE);
+    if (!pointsEdgeLeft.empty() && !pointsEdgeRight.empty())
+        lineArea = std::clamp(ROWSIMAGE - std::max(pointsEdgeLeft.back().x,
+                                                pointsEdgeRight.back().x), 0, ROWSIMAGE);
 
+}
+
+void Track::synchronizeEdges()
+{
+    const size_t count = std::min(pointsEdgeLeft.size(), pointsEdgeRight.size());
+    pointsEdgeLeft.resize(count);
+    pointsEdgeRight.resize(count);
+    widthBlock.resize(count);
+    for (size_t index = 0; index < count; ++index)
+        widthBlock[index] = PointX(pointsEdgeLeft[index].x,
+                                  std::max(0, pointsEdgeRight[index].y - pointsEdgeLeft[index].y));
 }
 
 /**

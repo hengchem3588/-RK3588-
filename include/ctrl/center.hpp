@@ -49,11 +49,12 @@ private:
     string style = "";
     int countOut = 0;
     int timeout = 0;
+    int lastCenter = COLSIMAGE / 2;
 
     void showMode(Mat &img, FsmMode mode);
     uint16_t searchBreakLeftDown(vector<PointX> pointsEdgeLeft);
     uint16_t searchBreakRightDown(vector<PointX> pointsEdgeRight);
     vector<PointX> centerCompute(vector<PointX> pointsEdge, int side);
     void validRowsCal(vector<PointX> pointsEdgeLeft, vector<PointX> pointsEdgeRight);
-    void derailmentCheck(vector<PointX> pointsEdgeLeft, vector<PointX> pointsEdgeRight);
+    void derailmentCheck(shared_ptr<Params> &params);
 };
