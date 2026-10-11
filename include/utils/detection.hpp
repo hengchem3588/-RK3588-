@@ -136,6 +136,9 @@ public:
     void buildNms(const std::string &model_dir)
     {
         std::string model_file = model_dir + "/nms.tar";
+        std::ifstream existing(model_file + ".so", std::ios::binary | std::ios::ate);
+        if (existing.good() && existing.tellg() > std::streampos(0))
+            return;
         std::string untar_cmd = "tar -xf " + model_file + " -C . --no-same-owner";
         std::string final_file = model_file + ".so";
         std::string cc_cmd = "g++ -shared -fPIC -o " + final_file + " lib0.o devc.o";

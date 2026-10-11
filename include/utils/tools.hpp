@@ -25,6 +25,10 @@
 #include <iostream>
 #include <stdio.h>
 #include <string.h>
+#include <algorithm>
+#include <cmath>
+#include <limits>
+#include <vector>
 #include <opencv2/highgui.hpp>
 #include <opencv2/opencv.hpp>
 #include "ctrl/mapping.hpp"
@@ -68,13 +72,13 @@ inline Mapping ipm = Mapping(Size(COLSIMAGE, ROWSIMAGE),
  */
 struct PredictResult
 {
-    int type;          // ID
+    int type = -1;     // ID
     std::string label; // 标签
-    float score;       // 置信度
-    int x;             // 坐标(左下角点)
-    int y;             // 坐标
-    int width;         // 尺寸
-    int height;        // 尺寸
+    float score = 0.0f; // 置信度
+    int x = 0;         // 坐标(左上角点)
+    int y = 0;         // 坐标
+    int width = 0;     // 尺寸
+    int height = 0;    // 尺寸
 };
 
 /**
@@ -200,9 +204,13 @@ inline double sigma(vector<PointX> vec)
  */
 inline int factorial(int x)
 {
+    if (x < 0)
+        return 0;
     int f = 1;
     for (int i = 1; i <= x; i++)
     {
+        if (f > std::numeric_limits<int>::max() / i)
+            return std::numeric_limits<int>::max();
         f *= i;
     }
     return f;
@@ -218,26 +226,21 @@ inline int factorial(int x)
 inline vector<PointX> Bezier(double dt, vector<PointX> input)
 {
     vector<PointX> output;
+    if (input.empty() || !std::isfinite(dt) || dt < 0.00001)
+        return output;
+    vector<cv::Point2d> work(input.size());
 
     double t = 0;
     while (t <= 1)
     {
-        PointX p;
-        double x_sum = 0.0;
-        double y_sum = 0.0;
-        int i = 0;
-        int n = input.size() - 1;
-        while (i <= n)
+        for (size_t index = 0; index < input.size(); ++index)
+            work[index] = cv::Point2d(input[index].x, input[index].y);
+        for (size_t remaining = work.size(); remaining > 1; --remaining)
         {
-            double k =
-                factorial(n) / (factorial(i) * factorial(n - i)) * pow(t, i) * pow(1 - t, n - i);
-            x_sum += k * input[i].x;
-            y_sum += k * input[i].y;
-            i++;
+            for (size_t index = 0; index + 1 < remaining; ++index)
+                work[index] = work[index] * (1.0 - t) + work[index + 1] * t;
         }
-        p.x = x_sum;
-        p.y = y_sum;
-        output.push_back(p);
+        output.emplace_back(static_cast<int>(work[0].x), static_cast<int>(work[0].y));
         t += dt;
     }
     return output;
@@ -253,7 +256,11 @@ inline vector<PointX> Bezier(double dt, vector<PointX> input)
 inline auto doble2String(double val, int fixed)
 {
     auto str = std::to_string(val);
-    return str.substr(0, str.find(".") + fixed + 1);
+    const auto dot = str.find('.');
+    if (!std::isfinite(val) || dot == std::string::npos)
+        return str;
+    fixed = std::clamp(fixed, 0, 6);
+    return str.substr(0, dot + (fixed > 0 ? fixed + 1 : 0));
 }
 /**
  * @brief 点到直线的距离计算
@@ -265,19 +272,12 @@ inline auto doble2String(double val, int fixed)
  */
 inline double distanceForPoint2Line(PointX a, PointX b, PointX p)
 {
-    int d = 0; // 距离
-
-    double ab_distance =
-        sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y));
-    double ap_distance =
-        sqrt((a.x - p.x) * (a.x - p.x) + (a.y - p.y) * (a.y - p.y));
-    double bp_distance =
-        sqrt((p.x - b.x) * (p.x - b.x) + (p.y - b.y) * (p.y - b.y));
-
-    double half = (ab_distance + ap_distance + bp_distance) / 2;
-    double area = sqrt(half * (half - ab_distance) * (half - ap_distance) * (half - bp_distance));
-
-    return (2 * area / ab_distance);
+    const double deltaX = static_cast<double>(b.x) - a.x;
+    const double deltaY = static_cast<double>(b.y) - a.y;
+    const double length = std::hypot(deltaX, deltaY);
+    if (length < 1e-9)
+        return std::hypot(static_cast<double>(p.x) - a.x, static_cast<double>(p.y) - a.y);
+    return std::abs(deltaX * (p.y - a.y) - deltaY * (p.x - a.x)) / length;
 }
 
 /**
@@ -410,7 +410,10 @@ inline double gradientCal(PointX a, PointX b)
 inline int linearCheck(vector<PointX> PointsEdge, int startLine = 0, int endLine = ROWSIMAGE - 1, int judgebias = 3)
 {
     int bias = 0;
-    endLine = min(endLine, (int)PointsEdge.size());
+    if (PointsEdge.size() < 2)
+        return bias;
+    startLine = std::clamp(startLine, 0, static_cast<int>(PointsEdge.size()) - 1);
+    endLine = std::clamp(endLine, startLine, static_cast<int>(PointsEdge.size()) - 1);
     double k = gradientCal(PointsEdge[startLine], PointsEdge[endLine]); // 斜率
     double b = PointsEdge[startLine].y - k * PointsEdge[startLine].x;
     for (int j = startLine; j < endLine; j++)

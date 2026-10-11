@@ -43,6 +43,9 @@ Predeal::Predeal(int bin)
         file["distCoeffs"] >> distCoeffs;
         cout << "相机矫正参数初始化成功!" << endl;
         enable = true;
+        mapSize = cv::Size(COLSIMAGE, ROWSIMAGE);
+        initUndistortRectifyMap(cameraMatrix, distCoeffs, cv::Mat::eye(3, 3, CV_32F),
+                               cameraMatrix, mapSize, CV_32FC1, mapx, mapy);
     }
     else
     {
@@ -86,18 +89,14 @@ cv::Mat Predeal::binaryzation(cv::Mat &img)
  */
 void Predeal::correction(cv::Mat &img)
 {
-    if (enable)
+    if (enable && !img.empty())
     {
-        Size sizeImage; // 图像的尺寸
-        sizeImage.width = img.cols;
-        sizeImage.height = img.rows;
-
-        cv::Mat mapx = cv::Mat(sizeImage, CV_32FC1);    // 经过矫正后的X坐标重映射参数
-        cv::Mat mapy = cv::Mat(sizeImage, CV_32FC1);    // 经过矫正后的Y坐标重映射参数
-        cv::Mat rotMatrix = cv::Mat::eye(3, 3, CV_32F); // 内参矩阵与畸变矩阵之间的旋转矩阵
-
-        // 采用initUndistortRectifyMap+remap进行图像矫正
-        initUndistortRectifyMap(cameraMatrix, distCoeffs, rotMatrix, cameraMatrix, sizeImage, CV_32FC1, mapx, mapy);
+        if (mapSize != img.size())
+        {
+            mapSize = img.size();
+            initUndistortRectifyMap(cameraMatrix, distCoeffs, cv::Mat::eye(3, 3, CV_32F),
+                                   cameraMatrix, mapSize, CV_32FC1, mapx, mapy);
+        }
         remap(img, img, mapx, mapy, INTER_LINEAR);
     }
 }
@@ -109,6 +108,9 @@ void Predeal::correction(cv::Mat &img)
  */
 void Predeal::imgCutting(cv::Mat &img)
 {
+    // 疑似未使用路径：输出300x180与主链320x240约定不一致，不应接入Track。
+    if (img.empty() || img.cols < 300 || img.rows < 175)
+        return;
     // 图像裁剪
     // 提取 55~175 行，列方向为 30~310
     cv::Rect roi(40, 55, 260, 120); // (x, y, width, height)
