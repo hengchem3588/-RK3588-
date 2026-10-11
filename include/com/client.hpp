@@ -26,6 +26,8 @@
 #include <stdint.h> // 整型数据类
 #include <string>
 #include <thread>
+#include <atomic>
+#include <cerrno>
 #include <cstring>
 #include <sys/socket.h>
 #include <arpa/inet.h>
@@ -64,7 +66,7 @@ private:
     std::thread threadRes;  // 串口接收子线程
     std::string portName;   // 端口名字
     SerialStruct serialStr; // 串口通信数据结构体
-    int socketId = 0;
+    int socketId = -1;
     int countInit = 0; // 初始化计数器
     /**
      * @brief 32位数据内存对齐/联合体
@@ -93,7 +95,7 @@ public:
     Client() {};
     // 定义析构函数
     ~Client() { closeClient(); };
-    bool keypress = false; // 按键
+    std::atomic<bool> keypress{false}; // 按键
 
     /**
      * @brief 蜂鸣器音效
@@ -143,12 +145,19 @@ public:
         threadRes = std::thread([this]()
                                 {
         char buffer[1024] = {0};
+        std::string pending;
         while (1) {
-        int len = read(socketId, buffer, 1024);
+        const ssize_t len = read(socketId, buffer, sizeof(buffer));
+        if (len < 0 && errno == EINTR)
+            continue;
+        if (len <= 0)
+            break;
 
-        std::string str(buffer);
-        if (str.find("Keypress") != std::string::npos)//按键按下
+        pending.append(buffer, static_cast<size_t>(len));
+        if (pending.find("Keypress") != std::string::npos)//按键按下
             keypress = true;
+        if (pending.size() > 7)
+            pending.erase(0, pending.size() - 7);
       } });
         return true;
     }
@@ -159,9 +168,14 @@ public:
      */
     void closeClient()
     {
+        if (socketId < 0)
+            return;
         carControl(0, 1500); // 舵机PWM中值 1500
+        shutdown(socketId, SHUT_RDWR);
+        if (threadRes.joinable())
+            threadRes.join();
         close(socketId);
-        threadRes.join();
+        socketId = -1;
     }
 
     /**
@@ -191,7 +205,7 @@ public:
         memcpy(data, buff, len); // 拷贝内存数据，防止“\0”数据丢失
 
         // 发送消息到服务器
-        send(socketId, data, len, 0);
+        send(socketId, data, len, MSG_NOSIGNAL);
     }
 
     /**

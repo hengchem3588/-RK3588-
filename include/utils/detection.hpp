@@ -31,6 +31,12 @@
 #include <algorithm>
 #include <vector>
 #include <chrono>
+#include <cmath>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <numeric>
+#include <stdexcept>
 #include <unordered_map>
 #include <cstdlib>
 #include <memory>
@@ -114,7 +120,10 @@ public:
         else
         {
             std::cout << "Open Lable File failed: " << pathLabels << std::endl;
+            throw std::runtime_error("AI label file cannot be opened: " + pathLabels);
         }
+        if (labels.empty())
+            throw std::runtime_error("AI label file is empty: " + pathLabels);
     };
 
     /**
@@ -178,6 +187,9 @@ public:
         cv::Mat frame,
         const std::vector<int64_t> &input_size)
     {
+        if (frame.empty() || frame.type() != CV_8UC3 || input_size.size() != 2 ||
+            input_size[0] <= 0 || input_size[1] <= 0)
+            throw std::runtime_error("Invalid AI input image or tensor size");
         cv::Mat x;
         NDTensor scale_factor({1, 2}), img({1, 3, input_size[0], input_size[1]});
         scale_factor.value()[0] = static_cast<float>(input_size[0]) / frame.size[0];
@@ -244,10 +256,19 @@ public:
             this->onnx_out_names_.second.data(),
             this->onnx_out_names_.second.size());
 
-        auto *data0 = onnx_out[0].GetTensorData<float>();
-        auto *data1 = onnx_out[1].GetTensorData<float>();
+        if (onnx_out.size() < 2)
+            throw std::runtime_error("Invalid ONNX output count");
         auto output_shape0 = onnx_out[0].GetTensorTypeAndShapeInfo().GetShape();
         auto output_shape1 = onnx_out[1].GetTensorTypeAndShapeInfo().GetShape();
+        if (output_shape0.size() != 3 || output_shape1.size() != 3 ||
+            output_shape0[0] != 1 || output_shape1[0] != 1 ||
+            output_shape0[1] <= 0 || output_shape0[1] > std::numeric_limits<int32_t>::max() ||
+            output_shape0[2] != 4 || output_shape1[1] <= 0 ||
+            output_shape1[1] > std::numeric_limits<int32_t>::max() ||
+            output_shape1[2] != output_shape0[1])
+            throw std::runtime_error("Invalid ONNX boxes/scores tensor shape");
+        auto *data0 = onnx_out[0].GetTensorData<float>();
+        auto *data1 = onnx_out[1].GetTensorData<float>();
 
         int32_t cls_num, num, box_point;
         // bbox
@@ -258,8 +279,8 @@ public:
         NDTensor bboxes({1, num, box_point});
         NDTensor scores({1, cls_num, num});
 
-        std::memcpy(bboxes.value(), data0, num * box_point * sizeof(float));
-        std::memcpy(scores.value(), data1, cls_num * num * sizeof(float));
+        std::memcpy(bboxes.value(), data0, size_t(num) * size_t(box_point) * sizeof(float));
+        std::memcpy(scores.value(), data1, size_t(cls_num) * size_t(num) * sizeof(float));
 
         // ppnc_nms run
         this->predictor_nms_->set_inputs({{"bboxes", bboxes}, {"scores", scores}});
@@ -275,36 +296,51 @@ public:
     {
         NDTensor res = get_output(0);
         auto data = res.value();
-        auto prod = std::accumulate(res.shape.begin(), res.shape.end(), 1,
-                                    std::multiplies<int64_t>());
+        int64_t prod = 1;
+        if (res.shape.empty())
+            throw std::runtime_error("Invalid NMS tensor shape");
+        for (const auto dimension : res.shape)
+        {
+            if (dimension < 0 || (dimension > 0 && prod > std::numeric_limits<int64_t>::max() / dimension))
+                throw std::runtime_error("Invalid NMS tensor dimension");
+            prod *= dimension;
+        }
+        if (prod % 6 != 0 || (prod > 0 && data == nullptr))
+            throw std::runtime_error("Invalid NMS result layout");
 
         results.clear();
-        PredictResult result;
-        for (int i = 0; i < prod; i += 6)
+        for (int64_t i = 0; i < prod; i += 6)
         {
-            result.type = data[i];
-            result.score = data[i + 1];
-
-            if (result.score < score) // 阈值
+            bool finite = true;
+            for (int offset = 0; offset < 6; ++offset)
+                finite = finite && std::isfinite(data[i + offset]);
+            if (!finite || data[i] < 0 || data[i] >= labels.size() ||
+                std::floor(data[i]) != data[i] || data[i + 1] < 0.0f || data[i + 1] < score ||
+                data[i + 1] > 1.0f)
                 continue;
 
-            // turnning....
-            if (result.type < labels.size())
-                result.label = labels[result.type];
-            result.x = data[i + 2];
-            result.y = data[i + 3];
-            result.width = data[i + 4] - data[i + 2];
-            result.height = data[i + 5] - data[i + 3];
+            const float left = std::clamp(data[i + 2], 0.0f, float(COLSIMAGE));
+            const float top = std::clamp(data[i + 3], 0.0f, float(ROWSIMAGE));
+            const float right = std::clamp(data[i + 4], 0.0f, float(COLSIMAGE));
+            const float bottom = std::clamp(data[i + 5], 0.0f, float(ROWSIMAGE));
+            if (right <= left || bottom <= top)
+                continue;
+
+            PredictResult result;
+            result.type = static_cast<int>(data[i]);
+            result.score = data[i + 1];
+            result.label = labels[result.type];
+            result.x = static_cast<int>(left);
+            result.y = static_cast<int>(top);
+            result.width = static_cast<int>(right - left);
+            result.height = static_cast<int>(bottom - top);
+            if (result.width <= 0 || result.height <= 0)
+                continue;
             results.push_back(result);
         }
     }
 
     // 单线程工具兼容入口；并发主循环必须传入帧快照
-    void drawBox(Mat &img)
-    {
-        drawBox(img, results);
-    }
-
     void drawBox(Mat &img, const std::vector<PredictResult> &resultsSnapshot)
     {
         for (int i = 0; i < resultsSnapshot.size(); i++)

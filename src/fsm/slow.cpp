@@ -61,7 +61,10 @@ FsmMode FsmSlow::getMode()
 void FsmSlow::run(Mat &img)
 {
     if (!params->config.slow) // 该模式未启用
+    {
+        setStep(Step::NONE);
         return;
+    }
 
     switch (step)
     {
@@ -125,7 +128,7 @@ void FsmSlow::run(Mat &img)
                 }
             }
         }
-        if ((countRec >= 2 || timeout > 110) && params->slowActiveFrames >= MIN_SLOW_FRAMES) // 最小持续量保护全部退出路径
+        if ((countRec >= 2 || timeout >= MIN_SLOW_FRAMES) && params->slowActiveFrames >= MIN_SLOW_FRAMES) // 最小持续量保护全部退出路径
             setStep(Step::NONE);
 
         if (countRec > 0) // 识别AI标志后开始场次计数
@@ -173,4 +176,5 @@ void FsmSlow::setStep(Step st)
     countSes = 0; // 场次计数器
     timeout = 0;  // 超时计数器
     params->slowActiveFrames = 0;
+    params->ctrl.slow = (st == Step::ENABLE);
 }

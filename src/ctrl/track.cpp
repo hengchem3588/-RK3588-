@@ -48,6 +48,7 @@ void Track::handle(bool isResearch, uint16_t rowStart)
     int counterSearchRows = pointsEdgeLeft.size(); // 搜索行计数
     int startBlock[30] = {};                       // 色块起点（行）
     int endBlock[30] = {};                         // 色块终点（行）
+    constexpr int maxBlocks = static_cast<int>(sizeof(startBlock) / sizeof(startBlock[0]));
     int counterBlock = 0;                          // 色块计数器（行）
     PointX pointSpurroad;                          // 岔路坐标
     int counterSpurroad = 0;                       // 岔路识别标志
@@ -107,21 +108,25 @@ void Track::handle(bool isResearch, uint16_t rowStart)
         {
             if (pixels[col] > 127 && pixels[col - 1] <= 127)
             {
+                if (counterBlock >= maxBlocks)
+                    break;
                 startBlock[counterBlock] = col;
             }
             else
             {
                 if (pixels[col] <= 127 && pixels[col - 1] > 127)
                 {
+                    if (counterBlock >= maxBlocks)
+                        break;
                     endBlock[counterBlock++] = col;
-                    if (counterBlock >= end(endBlock) - begin(endBlock))
+                    if (counterBlock >= maxBlocks)
                         break;
                 }
             }
         }
         if (pixels[COLSIMAGE - 1] > 127)
         {
-            if (counterBlock < end(endBlock) - begin(endBlock))
+            if (counterBlock < maxBlocks)
                 endBlock[counterBlock++] = COLSIMAGE - 1;
         }
 
@@ -278,8 +283,8 @@ void Track::handle(bool isResearch, uint16_t rowStart)
     stdevLeft = stdevEdgeCal(pointsEdgeLeft, ROWSIMAGE); // 计算边缘方差
     stdevRight = stdevEdgeCal(pointsEdgeRight, ROWSIMAGE);
     if (!pointsEdgeLeft.empty() && !pointsEdgeRight.empty())
-        lineArea = std::clamp(ROWSIMAGE - std::max(pointsEdgeLeft.back().x,
-                                                pointsEdgeRight.back().x), 0, ROWSIMAGE);
+        lineArea = std::clamp(std::max(pointsEdgeLeft.back().x, pointsEdgeRight.back().x),
+                              0, std::max(1, ROWSIMAGE - 1 - int(rowCutUp)));
 
 }
 
@@ -290,8 +295,12 @@ void Track::synchronizeEdges()
     pointsEdgeRight.resize(count);
     widthBlock.resize(count);
     for (size_t index = 0; index < count; ++index)
+    {
+        pointsEdgeLeft[index].y = std::clamp(pointsEdgeLeft[index].y, 0, COLSIMAGE - 1);
+        pointsEdgeRight[index].y = std::clamp(pointsEdgeRight[index].y, 0, COLSIMAGE - 1);
         widthBlock[index] = PointX(pointsEdgeLeft[index].x,
                                   std::max(0, pointsEdgeRight[index].y - pointsEdgeLeft[index].y));
+    }
 }
 
 /**

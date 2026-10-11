@@ -28,6 +28,7 @@
 #include <stdint.h>               // 整型数据类
 #include <string.h>
 #include <thread>
+#include <atomic>
 
 using namespace LibSerial;
 using namespace std;
@@ -125,9 +126,9 @@ public:
     Uart() {};
     // 定义析构函数
     ~Uart() { close(); };
-    bool keypress = false; // 按键
-    bool killAll = false;  // 杀进程
-    bool exitBoot = false; // 退出boot
+    std::atomic<bool> keypress{false}; // 按键
+    std::atomic<bool> killAll{false};  // 杀进程
+    std::atomic<bool> exitBoot{false}; // 退出boot
     bool running = false;  // 运行状态
 
     /**

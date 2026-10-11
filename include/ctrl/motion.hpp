@@ -54,7 +54,7 @@ public:
         }
         if (params->mode == FsmMode::YFORK)                // yfork单边：立即跟随center，不被上一帧偏差限速拖反
             errorLast = (int)error;
-        else if (abs(error - errorLast) > COLSIMAGE / 20)  // 普通跟线：限速防猛打方向
+        else if (abs(error - errorLast) > COLSIMAGE / 10)  // 普通跟线：限速防猛打方向
         {
             error = error > errorLast ? errorLast + COLSIMAGE / 10
                                       : errorLast - COLSIMAGE / 10;
@@ -93,14 +93,11 @@ public:
 
         if (params->ctrl.back) // 倒车(停车场)
         {
-            params->ctrl.speed = -params->config.velPark;
+            params->ctrl.speed = -(params->ctrl.slow ? std::min(params->config.velPark, params->config.velSlow)
+                                                   : params->config.velPark);
             return;
         }
-        if (params->ctrl.slow) // 减速区速度
-        {
-            params->ctrl.speed = params->config.velSlow;
-        }
-        else if (params->mode == FsmMode::STOP) // 停车区速度
+        if (params->mode == FsmMode::STOP) // 停车区速度
         {
             params->ctrl.speed = params->config.velStop;
         }
@@ -133,6 +130,8 @@ public:
             params->ctrl.speed = params->config.velLow +
                 std::pow(line / upper, 3) * (params->config.velHigh - params->config.velLow);
         }
+        if (params->ctrl.slow)
+            params->ctrl.speed = std::min(params->ctrl.speed, params->config.velSlow);
         if (std::isfinite(params->ctrl.speedLimit) && params->ctrl.speedLimit > 0.0)
             params->ctrl.speed = std::min(params->ctrl.speed, float(params->ctrl.speedLimit));
     }

@@ -293,12 +293,15 @@ void FsmStop::show(Mat &img)
  */
 double FsmStop::getRoadCarPloy(PredictResult result)
 {
-    if (params->track->pointsEdgeLeft.size() < ROWSIMAGE / 5 && params->track->pointsEdgeRight.size() < ROWSIMAGE / 5)
+    polyRoad.clear();
+    polyCar.clear();
+    if (params->track->pointsEdgeLeft.size() < ROWSIMAGE / 5 &&
+        params->track->pointsEdgeRight.size() < ROWSIMAGE / 5)
         return 0.0;
 
     // 添加赛道多边形轮廓
     PointX ppoliy;
-    if (params->track->pointsEdgeLeft.size() < 5 && params->track->pointsEdgeRight.size() > 5) // 右单边
+    if (params->track->pointsEdgeLeft.size() <= 5 && params->track->pointsEdgeRight.size() > 5) // 右单边
     {
         // [1]左上点
         ppoliy.x = params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() - 1].x;
@@ -327,15 +330,17 @@ double FsmStop::getRoadCarPloy(PredictResult result)
         polyRoad.push_back(cv::Point(ppoliy.y, ppoliy.x)); // 2
     }
 
-    if (params->track->pointsEdgeLeft.size() > 5 && params->track->pointsEdgeRight.size() < 5) // 左单边
+    if (params->track->pointsEdgeLeft.size() > 5 && params->track->pointsEdgeRight.size() <= 5) // 左单边
     {
         //[3] 右下点
         ppoliy.x = params->track->pointsEdgeLeft[0].x;
         ppoliy.y = COLSIMAGE - 1;
+        polyRoad.push_back(cv::Point(ppoliy.y, ppoliy.x));
 
         //[4] 右上点
         ppoliy.x = params->track->pointsEdgeLeft[params->track->pointsEdgeLeft.size() - 1].x;
         ppoliy.y = COLSIMAGE - 1;
+        polyRoad.push_back(cv::Point(ppoliy.y, ppoliy.x));
     }
     else
     {
@@ -355,11 +360,20 @@ double FsmStop::getRoadCarPloy(PredictResult result)
         polyRoad.push_back(cv::Point(ppoliy.y, ppoliy.x));
     }
 
+    if (polyRoad.size() < 3 || result.width <= 0 || result.height <= 0)
+        return 0.0;
+
     // 添加车辆多边形轮廓
-    polyCar.push_back(cv::Point(result.x, result.y));
-    polyCar.push_back(cv::Point(result.x, result.y + result.height));
-    polyCar.push_back(cv::Point(result.x + result.width, result.y + result.height));
-    polyCar.push_back(cv::Point(result.x + result.width, result.y));
+    const int leftCar = std::clamp(result.x, 0, COLSIMAGE - 1);
+    const int topCar = std::clamp(result.y, 0, ROWSIMAGE - 1);
+    const int rightCar = std::clamp(result.x + result.width, leftCar + 1, COLSIMAGE) - 1;
+    const int bottomCar = std::clamp(result.y + result.height, topCar + 1, ROWSIMAGE) - 1;
+    if (rightCar < leftCar || bottomCar < topCar)
+        return 0.0;
+    polyCar.emplace_back(leftCar, topCar);
+    polyCar.emplace_back(leftCar, bottomCar);
+    polyCar.emplace_back(rightCar, bottomCar);
+    polyCar.emplace_back(rightCar, topCar);
 
     return getOverlapArea(polyRoad, polyCar); // 计算多边形重合度
 }
@@ -373,13 +387,15 @@ double FsmStop::getRoadCarPloy(PredictResult result)
  */
 double FsmStop::getOverlapArea(const std::vector<cv::Point> &polyA, const std::vector<cv::Point> &polyB)
 {
-    // 创建两个多边形的掩模
-    cv::Mat maskA = cv::Mat::zeros(500, 500, CV_8UC1);
-    cv::Mat maskB = cv::Mat::zeros(500, 500, CV_8UC1); // 智能车
+    if (polyA.size() < 3 || polyB.size() < 3)
+        return 0.0;
+
+    cv::Mat maskA = cv::Mat::zeros(ROWSIMAGE, COLSIMAGE, CV_8UC1);
+    cv::Mat maskB = cv::Mat::zeros(ROWSIMAGE, COLSIMAGE, CV_8UC1);
 
     // 填充多边形
-    cv::fillConvexPoly(maskA, polyA, cv::Scalar(255));
-    cv::fillConvexPoly(maskB, polyB, cv::Scalar(255));
+    cv::fillPoly(maskA, std::vector<std::vector<cv::Point>>{polyA}, cv::Scalar(255));
+    cv::fillPoly(maskB, std::vector<std::vector<cv::Point>>{polyB}, cv::Scalar(255));
 
     // 计算交集
     cv::Mat intersection;
@@ -405,6 +421,8 @@ double FsmStop::getOverlapArea(const std::vector<cv::Point> &polyA, const std::v
  */
 void FsmStop::drawPolygon(Mat img, vector<Point> poly, bool fill, bool close)
 {
+    if (img.empty() || poly.size() < 2)
+        return;
     vector<vector<Point>> contours;
     contours.push_back(poly);
 

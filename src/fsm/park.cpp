@@ -111,7 +111,11 @@ void FsmPark::run(Mat &img)
         if (!params->ctrl.stop) // 停车等待
             timeout++;
         if (timeout > 80) // 超时退出停车状态
-            reset();      // 停车场数据复位
+        {
+            setStep(Step::NONE);
+            reset();
+            return;
+        }
 
         if (findSymbols(params->results, LABEL_PARK)) // 搜索AI标志：停车场
             countSes = 0;
@@ -601,26 +605,34 @@ void FsmPark::show(Mat &img)
         // 车位已停车辆绘制
         if (!spots.spotEnable[0] && spots.forks.size() > 0) // 1号车位
         {
-            cv::Rect rect(0, spots.forks[0].y - 10, 60, spots.forks[0].height + 20);
-            cv::rectangle(img, rect, cv::Scalar(0, 0, 255), 1);
+            const int top = std::clamp(spots.forks[0].y - 10, 0, ROWSIMAGE - 1);
+            const int bottom = std::clamp(spots.forks[0].y + spots.forks[0].height + 10, top + 1, ROWSIMAGE);
+            cv::rectangle(img, cv::Rect(0, top, 60, bottom - top), cv::Scalar(0, 0, 255), 1);
         }
         if (!spots.spotEnable[1] && spots.forks.size() > 0) // 2号车位
         {
-            cv::Rect rect(COLSIMAGE - 61, spots.forks[0].y - 10, 60, spots.forks[0].height + 20);
-            cv::rectangle(img, rect, cv::Scalar(0, 0, 255), 1);
+            const int top = std::clamp(spots.forks[0].y - 10, 0, ROWSIMAGE - 1);
+            const int bottom = std::clamp(spots.forks[0].y + spots.forks[0].height + 10, top + 1, ROWSIMAGE);
+            cv::rectangle(img, cv::Rect(COLSIMAGE - 60, top, 60, bottom - top), cv::Scalar(0, 0, 255), 1);
         }
         if (!spots.spotEnable[2] && spots.forks.size() > 1) // 3号车位
         {
-            cv::Rect rect(0, spots.forks[1].y - 10, 60, spots.forks[1].height + 20);
-            cv::rectangle(img, rect, cv::Scalar(0, 0, 255), 1);
+            const int top = std::clamp(spots.forks[1].y - 10, 0, ROWSIMAGE - 1);
+            const int bottom = std::clamp(spots.forks[1].y + spots.forks[1].height + 10, top + 1, ROWSIMAGE);
+            cv::rectangle(img, cv::Rect(0, top, 60, bottom - top), cv::Scalar(0, 0, 255), 1);
         }
         if (!spots.spotEnable[3] && spots.forks.size() > 1) // 4号车位
         {
-            cv::Rect rect(COLSIMAGE - 61, spots.forks[1].y - 10, 60, spots.forks[1].height + 20);
-            cv::rectangle(img, rect, cv::Scalar(0, 0, 255), 1);
+            const int top = std::clamp(spots.forks[1].y - 10, 0, ROWSIMAGE - 1);
+            const int bottom = std::clamp(spots.forks[1].y + spots.forks[1].height + 10, top + 1, ROWSIMAGE);
+            cv::rectangle(img, cv::Rect(COLSIMAGE - 60, top, 60, bottom - top), cv::Scalar(0, 0, 255), 1);
         }
-        savePicture("../res/samples/imgs/", imgIpm);
-        savePicture("../res/samples/imgs/", img);
+        if (params->config.saveImg && ++debugSaveCounter >= 10)
+        {
+            debugSaveCounter = 0;
+            savePicture("../res/samples/imgs/", imgIpm);
+            savePicture("../res/samples/imgs/", img);
+        }
         break;
     }
     case Step::ENTER:
@@ -659,6 +671,7 @@ void FsmPark::show(Mat &img)
  */
 void FsmPark::reset()
 {
+    countRes = 0;
     countSes = 0;      // AI场景识别计数器
     timeout = 0;       // 超时计数器
     step = Step::NONE; // 停车步骤
@@ -672,6 +685,7 @@ void FsmPark::reset()
     parkingPoseValid = false;
     parkingPreviousValid = false;
     parkingEntryTimeout = false;
+    debugSaveCounter = 0;
 }
 
 /**
@@ -823,7 +837,7 @@ void FsmPark::replanTracking(bool left)
  * @return true
  * @return false
  */
-bool FsmPark::findSymbols(vector<PredictResult> results, int label)
+bool FsmPark::findSymbols(const vector<PredictResult> &results, int label)
 {
     for (int i = 0; i < results.size(); i++)
     {
@@ -842,7 +856,7 @@ bool FsmPark::findSymbols(vector<PredictResult> results, int label)
  * @return true
  * @return false
  */
-bool FsmPark::findSymbols(vector<PredictResult> results, int label, PredictResult &target)
+bool FsmPark::findSymbols(const vector<PredictResult> &results, int label, PredictResult &target)
 {
     bool res = false;
     target.y = ROWSIMAGE - 1;
@@ -866,7 +880,7 @@ bool FsmPark::findSymbols(vector<PredictResult> results, int label, PredictResul
  *
  * @param results
  */
-vector<PredictResult> FsmPark::findParkStation(vector<PredictResult> results)
+vector<PredictResult> FsmPark::findParkStation(const vector<PredictResult> &results)
 {
     vector<PredictResult> resFork;
     for (int i = 0; i < results.size(); i++)
@@ -961,7 +975,7 @@ PointX FsmPark::getResultCenter(PredictResult res)
  * @param results
  * @return vector<PredictResult>
  */
-void FsmPark::findParkCars(vector<PredictResult> results)
+void FsmPark::findParkCars(const vector<PredictResult> &results)
 {
     // 数据复位
     for (int i = 0; i < spots.carPark.size(); i++)

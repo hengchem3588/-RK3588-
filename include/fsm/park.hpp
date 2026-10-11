@@ -130,15 +130,16 @@ private:
   int parkingNearLast = COLSIMAGE / 2;
   int parkingFarLast = COLSIMAGE / 2;
   int parkingEndLast = 0;
+  int debugSaveCounter = 0;
 
   bool readParkingPose();
   void setStep(Step st);
   void reset();
   void replanTracking();
   void replanTracking(bool left);
-  bool findSymbols(vector<PredictResult> results, int label);
-  bool findSymbols(vector<PredictResult> results, int label, PredictResult &target);
-  vector<PredictResult> findParkStation(vector<PredictResult> results);
+  bool findSymbols(const vector<PredictResult> &results, int label);
+  bool findSymbols(const vector<PredictResult> &results, int label, PredictResult &target);
+  vector<PredictResult> findParkStation(const vector<PredictResult> &results);
   PointX getResultCenter(PredictResult res);
-  void findParkCars(vector<PredictResult> results);
+  void findParkCars(const vector<PredictResult> &results);
 };

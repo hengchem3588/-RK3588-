@@ -36,6 +36,7 @@
 #include "ctrl/predeal.hpp"
 #include "ctrl/center.hpp"
 #include "ctrl/motion.hpp"
+#include "ctrl/curvature.hpp"
 #include <dirent.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -77,6 +78,7 @@ private:
     shared_ptr<Loops> loops;              // 子线程循环
     shared_ptr<Center> center;            // 控制中心处理类
     shared_ptr<Motion> motion;            // 运动控制器
+    shared_ptr<Curvature> curvature;
 
     // 全局共享数据链
     cv::Mat imgShare;
@@ -88,10 +90,12 @@ private:
     std::atomic<bool> stoppingAI{false};
     bool aiHasResult = false;
     bool aiFailed = false;
+    bool aiReady = false;
+    std::chrono::steady_clock::time_point aiStartupTime{};
     std::chrono::steady_clock::time_point imageTime{};
     std::chrono::steady_clock::time_point resultTime{};
     std::vector<PredictResult> resultsShare{}; // mtxRes 保护的最新完整推理结果
-    std::atomic<bool> readyRes{false}; // 已废弃：无消费者，保留声明与原写入
+    std::atomic<bool> readyRes{false}; // 已废弃：无消费者，当前不再写入，保留声明
 
     /**
      * @brief 鼠标的事件回调函数
@@ -134,6 +138,8 @@ private:
      */
     void runModel()
     {
+        try
+        {
         std::unique_lock<std::mutex> lock(mtxImg);
         cvImg.wait(lock, [this]
                    { return readyImg.load() || stoppingAI.load(); });
@@ -145,14 +151,11 @@ private:
         lock.unlock();
 
         // 启动AI推理
-        try
-        {
             detection->inference(img);
             std::lock_guard<std::mutex> lock_result(mtxRes);
             resultsShare = detection->results;
             resultTime = sourceTime;
             aiHasResult = true;
-            readyRes = true;
         }
         catch (const std::exception &error)
         {
@@ -169,16 +172,14 @@ private:
      */
     void runFsm(Mat &img)
     {
-        if (params->mode == FsmMode::FORK ||
-            params->mode == FsmMode::BUSY ||
-            params->mode == FsmMode::SLOW) // 状态复位
-            params->mode = FsmMode::NORMAL;
+        params->mode = FsmMode::NORMAL;
 
         fsmFactory.stop->run(img); // 停车区识别与规划
         params->mode = fsmFactory.stop->getMode();
         fsmFactory.cross->run(img); // 斑马线停车识别与规划
-        params->mode = fsmFactory.cross->getMode();
-        if (params->mode == FsmMode::NORMAL || params->mode == FsmMode::PARK) // 停车场图像处理
+        if (params->mode == FsmMode::NORMAL)
+            params->mode = fsmFactory.cross->getMode();
+        if (params->mode == FsmMode::NORMAL) // 停车场图像处理
         {
             fsmFactory.park->run(img);
             FsmMode mode = fsmFactory.park->getMode();
@@ -206,15 +207,23 @@ private:
         if (params->mode == FsmMode::NORMAL)
             params->mode = fsmFactory.slow->getMode();
 
-        fsmFactory.busy->run(img); // 施工区识别与规划
         if (params->mode == FsmMode::NORMAL)
+        {
+            fsmFactory.busy->run(img); // 施工区识别与规划
             params->mode = fsmFactory.busy->getMode();
+        }
 
-        if (yforkLock == 0) // 停车场退出后100帧内锁定 yfork，防止刚出停车场误触发岔路
+        if (params->mode == FsmMode::NORMAL && yforkLock == 0) // 停车场退出后100帧内锁定 yfork，防止刚出停车场误触发岔路
         {
             fsmFactory.yfork->run(img); // 岔路口识别与规划
-            if (params->mode == FsmMode::NORMAL)
-                params->mode = fsmFactory.yfork->getMode();
+            params->mode = fsmFactory.yfork->getMode();
+        }
+
+        if (params->mode != FsmMode::PARK)
+        {
+            params->ctrl.back = false;
+            params->ctrl.parking = false;
+            params->ctrl.fitting = false;
         }
 
         if (params->mode != params->modeLast)
@@ -232,13 +241,6 @@ public:
      */
     Icar()
     {
-        params = make_shared<Params>();                        // 初始化参数
-        center = make_shared<Center>();                        // 控制中心处理类
-        motion = make_shared<Motion>();                        // 运动控制器
-        predeal = make_shared<Predeal>(params->config.binary); // 图像预处理类
-        detection = make_shared<Detection>(params->config.model,
-                                           params->config.score); // AI模型初始化
-
         // 初始化TCP通信客户端
         client = make_shared<Client>();
         if (!client->start())
@@ -246,7 +248,24 @@ public:
             printf("[Error]: Socket init failed!!!\n");
             exit(-1);
         }
+        client->carControl(0, PWMSERVOMID);
         client->buzzerSound(client->BUZZER_OK); // 提示音效
+        try
+        {
+            params = make_shared<Params>();
+            center = make_shared<Center>();
+            motion = make_shared<Motion>();
+            curvature = make_shared<Curvature>();
+            curvature->configure(params->config);
+            predeal = make_shared<Predeal>(params->config.binary);
+            detection = make_shared<Detection>(params->config.model, params->config.score);
+        }
+        catch (const std::exception &error)
+        {
+            client->carControl(0, PWMSERVOMID);
+            std::cerr << "[Error]: Initialization failed, stopped: " << error.what() << std::endl;
+            exit(-1);
+        }
 
         // 相机初始化
         // USB摄像头初始化
@@ -317,7 +336,7 @@ public:
             show = make_shared<Show>(4); // 调试UI初始化
             show->frameMax = capture->get(cv::CAP_PROP_FRAME_COUNT) - 1;
             cv::createTrackbar("Frame", "ICAR", &show->index, show->frameMax, [](int, void *) {}); // 创建Opencv图像滑条控件
-            cv::setMouseCallback("ICAR", this->callbackMouse);                                     // 创建鼠标键盘快捷键事件
+            cv::setMouseCallback("ICAR", this->callbackMouse, this);                               // 创建鼠标键盘快捷键事件
         }
 
         // FSM有限状态机初始化
@@ -354,19 +373,21 @@ public:
      */
     void running()
     {
+        try
+        {
         //[01] 视频源读取
         cv::Mat img;
         if (params->config.debug) // 综合显示调试UI窗口
         {
+            if (client->keypress)
+            {
+                client->buzzerSound(client->BUZZER_FINISH); // 祖传提示音效
+                client->carControl(0, PWMSERVOMID);
+                printf("-----> System Exit!!! <-----\n");
+                exit(0); // 程序退出
+            }
             if (show->indexLast == show->index) // 图像帧未更新
             {
-                if (client->keypress)
-                {
-                    client->buzzerSound(client->BUZZER_FINISH); // 祖传提示音效
-                    client->carControl(0, PWMSERVOMID);
-                    printf("-----> System Exit!!! <-----\n");
-                    exit(0); // 程序退出
-                }
                 show->show();        // 显示综合绘图
                 client->sendHeart(); // 发送给服务器在线心跳
                 usleep(10 * 1000);   // us延迟
@@ -391,14 +412,6 @@ public:
             cv::resize(img, img, cv::Size(COLSIMAGE, ROWSIMAGE));
 
         // 帧首快照：本帧 FSM 与绘图共用，后续不再更新
-        bool firstInference = false;
-        if (!params->config.debug)
-        {
-            std::lock_guard<std::mutex> lock_result(mtxRes);
-            firstInference = !aiHasResult;
-            params->results = resultsShare;
-        }
-
         //[02] 图像存储
         if (params->config.saveImg && !params->config.debug) // 存储原始图像
             savePicture(img);
@@ -416,9 +429,11 @@ public:
         }
         else
         {
+            if (aiStartupTime == std::chrono::steady_clock::time_point{})
+                aiStartupTime = frameTime;
             // 锁只保护共享缓冲的交接，不要扩大作用域
             std::lock_guard<std::mutex> lock(mtxImg);
-            imgShare = img.clone();
+            img.copyTo(imgShare);
             imageTime = frameTime;
             readyImg = true;
             cvImg.notify_one();
@@ -430,17 +445,24 @@ public:
             if (!aiHasResult && !aiFailed)
                 cvRes.wait_for(lock_result, std::chrono::milliseconds(params->config.aiStartupTimeoutMs),
                                [this] { return aiHasResult || aiFailed; });
-            if (!aiHasResult || aiFailed ||
-                std::chrono::steady_clock::now() - resultTime >
-                    std::chrono::milliseconds(params->config.aiResultMaxAgeMs))
+            const auto now = std::chrono::steady_clock::now();
+            const bool fresh = aiHasResult && now - resultTime <=
+                std::chrono::milliseconds(params->config.aiResultMaxAgeMs);
+            if (aiFailed || (!fresh && (aiReady || now - aiStartupTime >=
+                std::chrono::milliseconds(params->config.aiStartupTimeoutMs))))
             {
                 client->carControl(0, PWMSERVOMID);
                 std::cerr << "[Error]: AI startup/result timeout, stopped." << std::endl;
                 params->quit = true;
                 exit(-1);
             }
-            if (firstInference)
-                params->results = resultsShare;
+            if (!fresh)
+            {
+                client->carControl(0, PWMSERVOMID);
+                return;
+            }
+            aiReady = true;
+            params->results = resultsShare;
         }
         imgBin = predeal->binaryzation(img); // 图像二值化
 
@@ -467,6 +489,7 @@ public:
 
         //[06] 控制中心计算
         center->fitting(params);
+        curvature->update(params);
 
         //[07] 车辆运动控制
         motion->poseControl(params);
@@ -478,6 +501,16 @@ public:
             detection->drawBox(img, params->results);        // 图像绘制AI结果
             center->drawImage(params, img); // 图像绘制控制路径
             motion->drawImage(params, img); // 图像绘制速度
+            if (curvature->enabled)
+            {
+                putText(img, "K:" + doble2String(curvature->curvature, 3) +
+                        " R:" + doble2String(curvature->radiusM, 2) +
+                        " Lim:" + doble2String(curvature->speedLimit, 2),
+                        Point(8, 36), FONT_HERSHEY_PLAIN, 0.8, Scalar(0, 255, 255), 1);
+                putText(img, "FF:" + doble2String(params->ctrl.steerFF, 1) +
+                        " Valid:" + to_string(curvature->valid),
+                        Point(8, 50), FONT_HERSHEY_PLAIN, 0.8, Scalar(0, 255, 255), 1);
+            }
             show->setNewWindow(3, "Ctrl", img);
 
             // 特殊区域图像处理结果显示
@@ -490,6 +523,8 @@ public:
             fsmFactory.slow->show(imgRes);
             fsmFactory.yfork->show(imgRes);
             show->setNewWindow(4, "FSM", imgRes);
+            show->show();
+            client->sendHeart();
         }
         else // 实车控制
         {
@@ -503,6 +538,15 @@ public:
             client->carControl(0, PWMSERVOMID); // 发送归中+停车指令
             printf("-----> System Exit (servo centered)! <-----\n");
             exit(0); // 程序退出
+        }
+        }
+        catch (const std::exception &error)
+        {
+            params->ctrl.stop = true;
+            params->quit = true;
+            client->carControl(0, PWMSERVOMID);
+            std::cerr << "[Error]: Main loop failed, stopped: " << error.what() << std::endl;
+            exit(-1);
         }
     }
 };

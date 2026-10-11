@@ -91,7 +91,8 @@ int main(int argc, char const *argv[])
         // 启动AI推理
         auto preTime = chrono::duration_cast<chrono::milliseconds>(chrono::system_clock::now().time_since_epoch()).count();
         detection->inference(img); // AI推理
-        detection->drawBox(img);   // 图像绘制AI结果
+        const auto resultsSnapshot = detection->results;
+        detection->drawBox(img, resultsSnapshot);   // 图像绘制AI结果
 
         // 帧率计算
         auto startTime = chrono::duration_cast<chrono::milliseconds>(chrono::system_clock::now().time_since_epoch()).count();

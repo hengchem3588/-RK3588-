@@ -64,7 +64,7 @@ struct Control
     float speed = 0.0;            // 发送给电机的速度
     int center = COLSIMAGE / 2;   // 控制中心
     vector<PointX> centerEdge;    // 赛道中心点集
-    int lineArea = 0;             // 有效前向行跨度：240-最远有效行，失败为0
+    int lineArea = 0;             // 最远有效行号，失败为0；按已确认语义，行号越大速度越大
     double steerFF = 0.0;
     double speedLimit = 0.0;
     bool fitting = false;         // 控制中心拟合标志(停车场专用)
@@ -112,6 +112,22 @@ struct Config
     string video = "../res/samples/fine.mp4";           // 视频路径
     int aiStartupTimeoutMs = 5000;
     int aiResultMaxAgeMs = 1000;
+    bool curvatureEnabled = false;
+    double curvaturePreviewPx = 45.0;
+    double curvatureFfGain = 0.0;
+    double curvatureFfLimit = 120.0;
+    double curvatureMinPreviewRow = 20.0;
+    double curvatureALatMax = 2.2;
+    double curvaturePxPerMeter = 0.0;
+    double curvaturePxPerMeterLateral = 0.0;
+    double curvatureWheelbase = 0.0;
+    double curvaturePwmPerRadian = 0.0;
+    double curvatureRearAxleOffset = 0.0;
+    double curvatureSpeedFloor = 0.40;
+    double curvatureDecelRate = 0.35;
+    double curvatureAccelRate = 0.08;
+    int curvatureOriginRow = ROWSIMAGE - 1;
+    int curvatureOriginCol = COLSIMAGE / 2;
     int parkEnterMaxFrames = 60; // 入库看门狗，30fps下2秒；超时停车，不作为入位成功
     int parkCenterTolerance = 8; // 近/远两行中点允许偏差(px)，需相机姿态实测
     int parkStableFrames = 5;    // 连续稳定观测下限，30fps下约0.17秒
@@ -158,6 +174,50 @@ public:
         {
             fileStr >> configs;
             config = configs.get<Config>();
+            const auto optional = [&configs](const char *name, auto &value)
+            {
+                if (configs.contains(name))
+                    configs.at(name).get_to(value);
+            };
+            optional("curvatureEnabled", config.curvatureEnabled);
+            optional("curvaturePreviewPx", config.curvaturePreviewPx);
+            optional("curvatureFfGain", config.curvatureFfGain);
+            optional("curvatureFfLimit", config.curvatureFfLimit);
+            optional("curvatureMinPreviewRow", config.curvatureMinPreviewRow);
+            optional("curvatureALatMax", config.curvatureALatMax);
+            optional("curvaturePxPerMeter", config.curvaturePxPerMeter);
+            optional("curvaturePxPerMeterLateral", config.curvaturePxPerMeterLateral);
+            optional("curvatureWheelbase", config.curvatureWheelbase);
+            optional("curvaturePwmPerRadian", config.curvaturePwmPerRadian);
+            optional("curvatureRearAxleOffset", config.curvatureRearAxleOffset);
+            optional("curvatureSpeedFloor", config.curvatureSpeedFloor);
+            optional("curvatureDecelRate", config.curvatureDecelRate);
+            optional("curvatureAccelRate", config.curvatureAccelRate);
+            optional("curvatureOriginRow", config.curvatureOriginRow);
+            optional("curvatureOriginCol", config.curvatureOriginCol);
+            const double geometryValues[] = {config.curvaturePreviewPx, config.curvatureFfGain,
+                config.curvatureFfLimit, config.curvatureMinPreviewRow, config.curvatureALatMax,
+                config.curvaturePxPerMeter, config.curvaturePxPerMeterLateral, config.curvatureWheelbase,
+                config.curvaturePwmPerRadian, config.curvatureRearAxleOffset, config.curvatureSpeedFloor,
+                config.curvatureDecelRate, config.curvatureAccelRate};
+            for (double value : geometryValues)
+                if (!std::isfinite(value))
+                    throw std::runtime_error("Curvature configuration must be finite");
+            if (config.curvaturePreviewPx <= 0.0 || config.curvaturePreviewPx >= ROWSIMAGE ||
+                config.curvatureMinPreviewRow <= 0.0 || config.curvatureMinPreviewRow > config.curvaturePreviewPx ||
+                config.curvatureFfGain < 0.0 || config.curvatureFfLimit < 0.0 || config.curvatureFfLimit > 400.0 ||
+                config.curvatureALatMax <= 0.0 || config.curvaturePxPerMeter < 0.0 ||
+                config.curvaturePxPerMeterLateral < 0.0 || config.curvatureWheelbase < 0.0 ||
+                config.curvatureRearAxleOffset < 0.0 || config.curvatureSpeedFloor < 0.0 ||
+                config.curvatureDecelRate <= 0.0 || config.curvatureDecelRate > 1.0 ||
+                config.curvatureAccelRate <= 0.0 || config.curvatureAccelRate > 1.0 ||
+                config.curvatureOriginRow < 0 || config.curvatureOriginRow >= ROWSIMAGE ||
+                config.curvatureOriginCol < 0 || config.curvatureOriginCol >= COLSIMAGE)
+                throw std::runtime_error("Invalid curvature parameter bounds");
+            if (config.curvatureEnabled &&
+                (config.curvaturePxPerMeter <= 0.0 || config.curvaturePxPerMeterLateral <= 0.0 ||
+                 (config.curvatureFfGain > 0.0 && (config.curvatureWheelbase <= 0.0 || config.curvaturePwmPerRadian == 0.0))))
+                throw std::runtime_error("Curvature requires measured IPM scales; feedforward also requires wheelbase and PWM calibration");
             if (configs.contains("aiStartupTimeoutMs"))
                 configs.at("aiStartupTimeoutMs").get_to(config.aiStartupTimeoutMs);
             if (configs.contains("aiResultMaxAgeMs"))
@@ -172,6 +232,9 @@ public:
                     throw std::runtime_error("Speed must be finite and nonnegative");
             if (config.velLow > config.velHigh || (config.slow && config.velSlow >= 0.5f))
                 throw std::runtime_error("Require velLow<=velHigh and velSlow<0.5 when slow is enabled");
+            if (!std::isfinite(config.score) || config.score < 0.0f || config.score > 1.0f ||
+                !std::isfinite(config.overlap) || config.overlap < 0.0f || config.overlap > 1.0f)
+                throw std::runtime_error("Detection score and overlap must be finite values in [0,1]");
             if (!std::isfinite(config.runP1) || !std::isfinite(config.runP2) ||
                 !std::isfinite(config.turnP) || !std::isfinite(config.turnD) ||
                 config.runP1 < 0.0f || config.runP2 < 0.0f || config.turnP < 0.0f || config.turnD < 0.0f)

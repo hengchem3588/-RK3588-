@@ -75,7 +75,7 @@ cv::Mat Predeal::binaryzation(cv::Mat &img)
     }
 
     // 图像转换
-    Mat imgInv = Mat::zeros(imgBin.size(), imgBin.type());
+    Mat imgInv;
     bitwise_not(imgBin, imgInv);
 
     return imgInv;

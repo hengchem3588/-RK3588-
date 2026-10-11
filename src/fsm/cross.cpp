@@ -145,12 +145,12 @@ void FsmCross::run(Mat &img)
             timeout = 0;     // 清零兜底计数,等待期不被timeout截断
         }
 
-        if (stopSeen) // 已识别停标:等待30帧后再进STOP停车
+        if (stopSeen) // 已识别停标:等待50帧后再进STOP停车
         {
             countRec++;
             if (countRec >= 50)
             {
-                setStep(Step::STOP); // 30帧等待结束才停
+                setStep(Step::STOP); // 50帧等待结束才停
                 return;
             }
         }
@@ -243,7 +243,7 @@ void FsmCross::setStep(Step st)
     countSes = 0; // 场次计数器
     timeout = 0;  // 超时计数器
     // params->ctrl.stop = false; // 保留原代码：stop 属于道闸/停车场，Cross 仅管理 crossStop
-    params->ctrl.crossStop = false;
+    params->ctrl.crossStop = (st == Step::STOP);
     if (st == Step::ENABLE)
         lapCounted = false;
     countCross = 0;

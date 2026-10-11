@@ -59,7 +59,6 @@ void Center::fitting(shared_ptr<Params> &params)
                  params->track->pointsEdgeRight.resize(std::min<size_t>(validRowsRight, params->track->pointsEdgeRight.size()));
          }
 
-
         if (params->track->pointsEdgeLeft.size() > 4 && params->track->pointsEdgeRight.size() > 4) // 通过双边缘有效点的差来判断赛道类型
         {
             v_center[0] = {
@@ -300,7 +299,9 @@ uint16_t Center::searchBreakLeftDown(vector<PointX> pointsEdgeLeft)
 {
     uint16_t counter = 0;
 
-    for (int i = 0; i < pointsEdgeLeft.size() - 10; i++)
+    if (pointsEdgeLeft.size() <= 10)
+        return 0;
+    for (int i = 0; i < static_cast<int>(pointsEdgeLeft.size()) - 10; i++)
     {
         if (pointsEdgeLeft[i].y >= 2)
         {
@@ -327,7 +328,9 @@ uint16_t Center::searchBreakRightDown(vector<PointX> pointsEdgeRight)
 {
     uint16_t counter = 0;
 
-    for (int i = 0; i < pointsEdgeRight.size() - 10; i++) // 寻找左边跳变点
+    if (pointsEdgeRight.size() <= 10)
+        return 0;
+    for (int i = 0; i < static_cast<int>(pointsEdgeRight.size()) - 10; i++) // 寻找左边跳变点
     {
         if (pointsEdgeRight[i].y < COLSIMAGE - 2)
         {
@@ -451,7 +454,8 @@ void Center::validRowsCal(vector<PointX> pointsEdgeLeft, vector<PointX> pointsEd
     {
         uint16_t rowBreakLeft = searchBreakLeftDown(pointsEdgeLeft);                                           // 右边缘上升拐点
         uint16_t rowBreakRight = searchBreakRightDown(pointsEdgeRight);                                        // 右边缘上升拐点
-        if (pointsEdgeRight[pointsEdgeRight.size() - 1].y < COLSIMAGE / 2 && rowBreakRight - rowBreakLeft > 5) // 左弯道
+        const int breakDelta = static_cast<int>(rowBreakRight) - static_cast<int>(rowBreakLeft);
+        if (pointsEdgeRight[pointsEdgeRight.size() - 1].y < COLSIMAGE / 2 && breakDelta > 5) // 左弯道
         {
             if (pointsEdgeLeft.size() > rowBreakRight) // 左边缘有效行重新搜索
             {
@@ -462,7 +466,7 @@ void Center::validRowsCal(vector<PointX> pointsEdgeLeft, vector<PointX> pointsEd
                         counter++;
                         if (counter >= 3)
                         {
-                            pointsEdgeLeft.resize(i - 3);
+                            pointsEdgeLeft.resize(static_cast<size_t>(std::max(0, i - 3)));
                         }
                     }
                     else
@@ -471,7 +475,7 @@ void Center::validRowsCal(vector<PointX> pointsEdgeLeft, vector<PointX> pointsEd
             }
         }
 
-        else if (pointsEdgeLeft[pointsEdgeLeft.size() - 1].y > COLSIMAGE / 2 && rowBreakLeft - rowBreakRight > 5) // 右弯道
+        else if (pointsEdgeLeft[pointsEdgeLeft.size() - 1].y > COLSIMAGE / 2 && breakDelta < -5) // 右弯道
         {
 
             if (pointsEdgeRight.size() > rowBreakLeft) // 右边缘有效行重新搜索
@@ -483,7 +487,7 @@ void Center::validRowsCal(vector<PointX> pointsEdgeLeft, vector<PointX> pointsEd
                         counter++;
                         if (counter >= 3)
                         {
-                            pointsEdgeRight.resize(i - 3);
+                            pointsEdgeRight.resize(static_cast<size_t>(std::max(0, i - 3)));
                         }
                     }
                     else
