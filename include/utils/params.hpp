@@ -27,6 +27,7 @@
 #include <cmath>
 #include <fstream>
 #include <stdexcept>
+#include <cstdint>
 #include "utils/json.hpp"
 #include "ctrl/track.hpp"
 
@@ -67,6 +68,11 @@ struct Control
     int lineArea = 0;             // 最远有效行号，失败为0；按已确认语义，行号越大速度越大
     double steerFF = 0.0;
     double speedLimit = 0.0;
+    double frameDt = 1.0 / 30.0;
+    bool yforkPath = false;
+    bool yforkStop = false;
+    double yforkSpeedCap = 0.0;
+    double yforkPreviewRow = 125.0;
     bool fitting = false;         // 控制中心拟合标志(停车场专用)
     bool parking = false;         // 停车场特殊模式
     int countAcc = 0;             // 起步低速保持帧数，不是速度爬升计算
@@ -87,9 +93,50 @@ struct Config
     float velYFork = 1.0;                               // 岔路口速度: m/s
     float runP1 = 1.5;                                  // 比例系数：直线控制量
     float runP2 = 0.012;                                // 动态P变化系数
-    float turnP = 3.5;                                  // 比例系数：转弯控制量
+    float turnP = 3.5;                                  // 【假旋钮】每帧被 runP1+runP2*|e| 覆盖，改它无效
     float turnD = 3.5;                                  // 微分系数：转弯控制量
+    float turnDFilter = 0.0f;                            // 普通巡线 D 项滤波：0=2025 原始差分行为
+    float speedSlew = 0.06f;                            // 速度指令斜率上限(m/s每30Hz帧)：0=关闭(=旧行为)
+    bool junctionShield = true;                         // 丁字口屏蔽：按赛道宽度截掉支路打开的远端行，防中心被吸进路口
+    float junctionWidthRatio = 1.45f;                   // 宽度超过底部中位数×该比例的行视为丁字支路行
+    int lineBiasPx = 0;                                 // 普通巡线控制中心横向偏移(px)：正=向图像右侧偏，负=向左
     bool debug = false;                                 // 调试模式使能
+    bool debugCamera = false;
+    string cameraDevice = "/dev/video0";
+    int yforkLockFrames = 100;
+    bool yforkArrowCheck = true;
+    float yforkSignScore = 0.55f;
+    int yforkSignMinRow = 22;
+    int yforkSignConfirmFrames = 3;
+    int yforkMinTurnFrames = 18;
+    int yforkExitConfirmFrames = 8;
+    int yforkMaxTurnFrames = 240;
+    int yforkCooldownFrames = 24;
+    float yforkApproachSpeed = 0.28f;
+    float yforkRunP1 = 2.4f;
+    float yforkRunP2 = 0.008f;
+    float yforkTurnD = 1.2f;
+    float yforkDerivativeAlpha = 0.35f;
+    float yforkServoSlew = 75.0f;
+    int yforkPreviewRow = 125;
+    float yforkPreviewSigma = 28.0f;
+    int yforkSignPaddingPx = 8;
+    int yforkClearancePx = 18;
+    float yforkOutsideBias = 0.08f;
+    int yforkLostPathFrames = 4;
+    int yforkBasePaddingPx = 8;
+    int yforkObstacleSidePaddingPx = 50;
+    int yforkObstacleDepthPx = 105;
+    int yforkVehicleHalfWidthPx = 18;
+    int yforkObstacleClearancePx = 12;
+    int yforkVehicleFrontPx = 12;
+    int yforkObstacleRowTolerancePx = 5;
+    int yforkObstacleMemoryFrames = 10;
+    float yforkObstacleSpeed = 0.55f;
+    int yforkObstacleSlowClearancePx = 20;
+    int yforkObstacleClippedExtensionPx = 150;
+    int yforkObstacleMinAreaPx = 24;
+    int yforkObstacleComponentLinkPx = 24;
     bool saveImg = false;                               // 存图使能
     bool saveIpm = false;                               // 存储IPM图像
     uint16_t rowCutUp = 10;                             // 图像顶部切行
@@ -128,9 +175,9 @@ struct Config
     double curvatureAccelRate = 0.08;
     int curvatureOriginRow = ROWSIMAGE - 1;
     int curvatureOriginCol = COLSIMAGE / 2;
-    int parkEnterMaxFrames = 60; // 入库看门狗，30fps下2秒；超时停车，不作为入位成功
-    int parkCenterTolerance = 8; // 近/远两行中点允许偏差(px)，需相机姿态实测
-    int parkStableFrames = 5;    // 连续稳定观测下限，30fps下约0.17秒
+    int parkEnterMaxFrames = 60;
+    int parkCenterTolerance = 8;
+    int parkStableFrames = 5;
     int slowMinFrames = 111; // 原 timeout>110 的退出尺度：111/30=3.7秒，区间长度仍需实测
     NLOHMANN_DEFINE_TYPE_INTRUSIVE(Config, velLow, velHigh, velSlow, velPark, velYFork, velBusy, velStop, velCross,
                                    runP1, runP2, turnP, turnD, debug, saveImg, saveIpm, rowCutUp, rowCutBottom,
@@ -159,10 +206,9 @@ public:
      * @brief Construct a new Params object
      *
      */
-    Params()
+    explicit Params(const std::string &path = "../res/config.json")
     {
         // 加载本地json配置文件
-        string path = "../res/config.json";
         std::ifstream fileStr(path);
         if (!fileStr.good())
         {
@@ -179,6 +225,96 @@ public:
                 if (configs.contains(name))
                     configs.at(name).get_to(value);
             };
+            optional("debugCamera", config.debugCamera);
+            optional("cameraDevice", config.cameraDevice);
+            // 以下两个是第二轮新增的旋钮；config.json 里不写就用上面的默认值，行为与旧版一致
+            optional("turnDFilter", config.turnDFilter);
+            optional("speedSlew", config.speedSlew);
+            optional("junctionShield", config.junctionShield);
+            optional("junctionWidthRatio", config.junctionWidthRatio);
+            optional("lineBiasPx", config.lineBiasPx);
+            if (!std::isfinite(config.turnDFilter) || config.turnDFilter < 0.0f || config.turnDFilter > 1.0f)
+                throw std::runtime_error("turnDFilter must be in [0,1]");
+            if (!std::isfinite(config.speedSlew) || config.speedSlew < 0.0f || config.speedSlew > 5.0f)
+                throw std::runtime_error("speedSlew must be in [0,5] m/s per frame");
+            if (!std::isfinite(config.junctionWidthRatio) || config.junctionWidthRatio < 1.0f ||
+                config.junctionWidthRatio > 3.0f)
+                throw std::runtime_error("junctionWidthRatio must be in [1.0,3.0]");
+            if (!std::isfinite(float(config.lineBiasPx)) || config.lineBiasPx < -80 || config.lineBiasPx > 80)
+                throw std::runtime_error("lineBiasPx must be in [-80,80]");
+            optional("yforkLockFrames", config.yforkLockFrames);
+            optional("yforkArrowCheck", config.yforkArrowCheck);
+            optional("yforkSignScore", config.yforkSignScore);
+            optional("yforkSignMinRow", config.yforkSignMinRow);
+            optional("yforkSignConfirmFrames", config.yforkSignConfirmFrames);
+            optional("yforkMinTurnFrames", config.yforkMinTurnFrames);
+            optional("yforkExitConfirmFrames", config.yforkExitConfirmFrames);
+            optional("yforkMaxTurnFrames", config.yforkMaxTurnFrames);
+            optional("yforkCooldownFrames", config.yforkCooldownFrames);
+            optional("yforkApproachSpeed", config.yforkApproachSpeed);
+            optional("yforkRunP1", config.yforkRunP1);
+            optional("yforkRunP2", config.yforkRunP2);
+            optional("yforkTurnD", config.yforkTurnD);
+            optional("yforkDerivativeAlpha", config.yforkDerivativeAlpha);
+            optional("yforkServoSlew", config.yforkServoSlew);
+            optional("yforkPreviewRow", config.yforkPreviewRow);
+            optional("yforkPreviewSigma", config.yforkPreviewSigma);
+            optional("yforkSignPaddingPx", config.yforkSignPaddingPx);
+            optional("yforkClearancePx", config.yforkClearancePx);
+            optional("yforkOutsideBias", config.yforkOutsideBias);
+            optional("yforkLostPathFrames", config.yforkLostPathFrames);
+            optional("yforkBasePaddingPx", config.yforkBasePaddingPx);
+            optional("yforkObstacleSidePaddingPx", config.yforkObstacleSidePaddingPx);
+            optional("yforkObstacleDepthPx", config.yforkObstacleDepthPx);
+            optional("yforkVehicleHalfWidthPx", config.yforkVehicleHalfWidthPx);
+            optional("yforkObstacleClearancePx", config.yforkObstacleClearancePx);
+            optional("yforkVehicleFrontPx", config.yforkVehicleFrontPx);
+            optional("yforkObstacleRowTolerancePx", config.yforkObstacleRowTolerancePx);
+            optional("yforkObstacleMemoryFrames", config.yforkObstacleMemoryFrames);
+            optional("yforkObstacleSpeed", config.yforkObstacleSpeed);
+            optional("yforkObstacleSlowClearancePx", config.yforkObstacleSlowClearancePx);
+            optional("yforkObstacleClippedExtensionPx", config.yforkObstacleClippedExtensionPx);
+            optional("yforkObstacleMinAreaPx", config.yforkObstacleMinAreaPx);
+            optional("yforkObstacleComponentLinkPx", config.yforkObstacleComponentLinkPx);
+            const float forkValues[] = {config.yforkSignScore, config.yforkApproachSpeed,
+                config.yforkRunP1, config.yforkRunP2, config.yforkTurnD,
+                config.yforkDerivativeAlpha, config.yforkServoSlew, config.yforkPreviewSigma,
+                config.yforkOutsideBias, config.yforkObstacleSpeed};
+            for (float value : forkValues)
+                if (!std::isfinite(value))
+                    throw std::runtime_error("Yfork parameters must be finite");
+            if (config.yforkSignScore < 0.0f || config.yforkSignScore > 1.0f ||
+                config.yforkSignMinRow < 0 || config.yforkSignMinRow >= ROWSIMAGE ||
+                config.yforkSignConfirmFrames < 2 || config.yforkSignConfirmFrames > 30 ||
+                config.yforkMinTurnFrames < 1 || config.yforkMaxTurnFrames < config.yforkMinTurnFrames ||
+                config.yforkMaxTurnFrames > 1800 || config.yforkExitConfirmFrames < 2 ||
+                config.yforkExitConfirmFrames > 120 || config.yforkCooldownFrames < 0 ||
+                config.yforkCooldownFrames > 600 || config.yforkApproachSpeed <= 0.0f ||
+                config.yforkRunP1 < 0.0f || config.yforkRunP2 < 0.0f || config.yforkTurnD < 0.0f ||
+                config.yforkDerivativeAlpha <= 0.0f || config.yforkDerivativeAlpha > 1.0f ||
+                config.yforkServoSlew <= 0.0f || config.yforkServoSlew > 400.0f ||
+                config.yforkPreviewRow < 60 || config.yforkPreviewRow > 180 ||
+                config.yforkPreviewSigma < 5.0f || config.yforkPreviewSigma > 80.0f ||
+                config.yforkSignPaddingPx < 0 || config.yforkSignPaddingPx > 40 ||
+                config.yforkClearancePx < 6 || config.yforkClearancePx > 60 ||
+                config.yforkOutsideBias < 0.0f || config.yforkOutsideBias > 0.2f ||
+                config.yforkLostPathFrames < 1 || config.yforkLostPathFrames > 15 ||
+                config.yforkBasePaddingPx < 0 || config.yforkBasePaddingPx > 30 ||
+                config.yforkObstacleSidePaddingPx < 10 || config.yforkObstacleSidePaddingPx > 100 ||
+                config.yforkObstacleDepthPx < 20 || config.yforkObstacleDepthPx > 180 ||
+                config.yforkVehicleHalfWidthPx < 4 || config.yforkVehicleHalfWidthPx > 50 ||
+                config.yforkObstacleClearancePx < 0 || config.yforkObstacleClearancePx > 30 ||
+                config.yforkVehicleFrontPx < 0 || config.yforkVehicleFrontPx > 40 ||
+                config.yforkObstacleRowTolerancePx < 0 || config.yforkObstacleRowTolerancePx > 20 ||
+                config.yforkObstacleMemoryFrames < 1 || config.yforkObstacleMemoryFrames > 60 ||
+                config.yforkObstacleSpeed <= 0.0f || config.yforkObstacleSpeed > config.velYFork ||
+                config.yforkObstacleSlowClearancePx < 0 || config.yforkObstacleSlowClearancePx > 100 ||
+                config.yforkObstacleClippedExtensionPx < 60 || config.yforkObstacleClippedExtensionPx > 220 ||
+                config.yforkObstacleMinAreaPx < 4 || config.yforkObstacleMinAreaPx > 2000 ||
+                config.yforkObstacleComponentLinkPx < 0 || config.yforkObstacleComponentLinkPx > 60)
+                throw std::runtime_error("Invalid yfork parameter bounds");
+            if (config.cameraDevice.empty() || config.yforkLockFrames < 0 || config.yforkLockFrames > 60000)
+                throw std::runtime_error("Camera device must be nonempty; yforkLockFrames must be in [0,60000]");
             optional("curvatureEnabled", config.curvatureEnabled);
             optional("curvaturePreviewPx", config.curvaturePreviewPx);
             optional("curvatureFfGain", config.curvatureFfGain);
@@ -248,10 +384,7 @@ public:
             if (config.parkEnterMaxFrames < 21 || config.parkEnterMaxFrames > 60000 ||
                 config.parkCenterTolerance < 1 || config.parkCenterTolerance > COLSIMAGE / 4 ||
                 config.parkStableFrames < 1 || config.parkStableFrames > 60000)
-            {
-                std::cerr << "Invalid parking frame/tolerance configuration" << std::endl;
-                exit(-1);
-            }
+                throw std::runtime_error("Invalid parking frame/tolerance configuration");
             if (configs.contains("slowMinFrames"))
                 configs.at("slowMinFrames").get_to(config.slowMinFrames);
             if (config.slowMinFrames < 1 || config.slowMinFrames > 60000)
@@ -279,6 +412,10 @@ public:
     FsmMode mode, modeLast;             // FSM状态场景
     shared_ptr<Track> track;            // 赛道识别类
     std::vector<PredictResult> results; // AI推理结果
+    cv::Mat cameraImage;
+    cv::Mat detectionImage;
+    std::uint64_t cameraFrame = 0;
+    std::uint64_t detectionFrame = 0;
     GateGeometry gateGeometry{};      // 道闸当次独立观测状态
     int slowActiveFrames = 0;          // 本次慢行累计帧数，LIMIT 检测不清零
     int lapCount = 0;                  // 已完成圈数：仅由起终点停车事件累计

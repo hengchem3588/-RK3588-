@@ -94,6 +94,10 @@ private:
     std::chrono::steady_clock::time_point aiStartupTime{};
     std::chrono::steady_clock::time_point imageTime{};
     std::chrono::steady_clock::time_point resultTime{};
+    std::chrono::steady_clock::time_point previousFrameTime{};
+    std::uint64_t imageFrameShare = 0;
+    std::uint64_t resultFrameShare = 0;
+    cv::Mat resultImageShare;
     std::vector<PredictResult> resultsShare{}; // mtxRes 保护的最新完整推理结果
     std::atomic<bool> readyRes{false}; // 已废弃：无消费者，当前不再写入，保留声明
 
@@ -147,6 +151,7 @@ private:
             return;
         cv::Mat img = imgShare.clone(); // 图像拷贝出来再释放锁
         const auto sourceTime = imageTime;
+        const auto sourceFrame = imageFrameShare;
         readyImg = false;
         lock.unlock();
 
@@ -155,6 +160,8 @@ private:
             std::lock_guard<std::mutex> lock_result(mtxRes);
             resultsShare = detection->results;
             resultTime = sourceTime;
+            resultFrameShare = sourceFrame;
+            resultImageShare = img;
             aiHasResult = true;
         }
         catch (const std::exception &error)
@@ -172,6 +179,8 @@ private:
      */
     void runFsm(Mat &img)
     {
+        params->ctrl.yforkPath = false;
+        params->ctrl.yforkSpeedCap = 0.0;
         params->mode = FsmMode::NORMAL;
 
         fsmFactory.stop->run(img); // 停车区识别与规划
@@ -186,15 +195,20 @@ private:
             if (mode != FsmMode::NORMAL)
                 params->mode = mode;
         }
-        // 停车场退出后 100 帧内屏蔽 yfork 触发：park 从激活回到 NORMAL 的过渡视为"刚退出"
         {
             bool parkActive = (fsmFactory.park->getMode() != FsmMode::NORMAL);
             if (parkWasActive && !parkActive)
-                yforkLock = 100; // 刚退出停车场，锁定 yfork
+                yforkLock = params->config.yforkLockFrames;
             parkWasActive = parkActive;
         }
         if (yforkLock > 0)
             yforkLock--;
+        if (params->mode == FsmMode::NORMAL && yforkLock == 0)
+        {
+            fsmFactory.yfork->run(img);
+            params->mode = fsmFactory.yfork->getMode();
+        }
+
         if (params->mode == FsmMode::NORMAL) // 岔路识别与规划
         {
             fsmFactory.fork->run(img);
@@ -213,17 +227,12 @@ private:
             params->mode = fsmFactory.busy->getMode();
         }
 
-        if (params->mode == FsmMode::NORMAL && yforkLock == 0) // 停车场退出后100帧内锁定 yfork，防止刚出停车场误触发岔路
-        {
-            fsmFactory.yfork->run(img); // 岔路口识别与规划
-            params->mode = fsmFactory.yfork->getMode();
-        }
-
         if (params->mode != FsmMode::PARK)
         {
             params->ctrl.back = false;
             params->ctrl.parking = false;
-            params->ctrl.fitting = false;
+            if (!params->ctrl.yforkPath)
+                params->ctrl.fitting = false;
         }
 
         if (params->mode != params->modeLast)
@@ -269,13 +278,13 @@ public:
 
         // 相机初始化
         // USB摄像头初始化
-        if (params->config.debug)
-            capture = make_shared<cv::VideoCapture>(params->config.video); // 打开本地视频
+        if (params->config.debug && !params->config.debugCamera)
+            capture = make_shared<cv::VideoCapture>(params->config.video);
         else
-            capture = make_shared<cv::VideoCapture>("/dev/video0"); // 打开摄像头
+            capture = make_shared<cv::VideoCapture>(params->config.cameraDevice);
         if (!capture->isOpened())
         {
-            if (params->config.debug)
+            if (params->config.debug && !params->config.debugCamera)
             {
                 char cwd[PATH_MAX] = {};
                 const bool cwdValid = getcwd(cwd, sizeof(cwd)) != nullptr;
@@ -324,7 +333,7 @@ public:
                 std::cerr << "请把 config.json 的 video 指向其中之一" << std::endl;
             }
             else
-                printf("[Error]: Can not open video device!!!\n");
+                std::cerr << "[Error]: Can not open camera: " << params->config.cameraDevice << std::endl;
             exit(-1);
         }
         capture->set(cv::CAP_PROP_FRAME_WIDTH, COLSCAMERA);  // 设置图像分辨率
@@ -333,10 +342,17 @@ public:
 
         if (params->config.debug)
         {
-            show = make_shared<Show>(4); // 调试UI初始化
-            show->frameMax = capture->get(cv::CAP_PROP_FRAME_COUNT) - 1;
-            cv::createTrackbar("Frame", "ICAR", &show->index, show->frameMax, [](int, void *) {}); // 创建Opencv图像滑条控件
-            cv::setMouseCallback("ICAR", this->callbackMouse, this);                               // 创建鼠标键盘快捷键事件
+            show = make_shared<Show>(4);
+            show->live = params->config.debugCamera;
+            if (!show->live)
+            {
+                show->frameMax = std::max(0, static_cast<int>(capture->get(cv::CAP_PROP_FRAME_COUNT)) - 1);
+                if (show->frameMax > 0)
+                    cv::createTrackbar("Frame", "ICAR", &show->index, show->frameMax, [](int, void *) {});
+                cv::setMouseCallback("ICAR", this->callbackMouse, this);
+            }
+            std::cout << "[Preview] " << (show->live ? params->config.cameraDevice : params->config.video)
+                      << " | motor output stays zero; q/Esc exits" << std::endl;
         }
 
         // FSM有限状态机初始化
@@ -375,57 +391,72 @@ public:
     {
         try
         {
-        //[01] 视频源读取
         cv::Mat img;
-        if (params->config.debug) // 综合显示调试UI窗口
-        {
-            if (client->keypress)
-            {
-                client->buzzerSound(client->BUZZER_FINISH); // 祖传提示音效
-                client->carControl(0, PWMSERVOMID);
-                printf("-----> System Exit!!! <-----\n");
-                exit(0); // 程序退出
-            }
-            if (show->indexLast == show->index) // 图像帧未更新
-            {
-                show->show();        // 显示综合绘图
-                client->sendHeart(); // 发送给服务器在线心跳
-                usleep(10 * 1000);   // us延迟
-                return;
-            }
-
-            capture->set(cv::CAP_PROP_POS_FRAMES, show->index); // 设置读取帧
-            if (!capture->read(img))
-                return;
-            show->indexLast = show->index;
-        }
-        else if (!capture->read(img) || img.empty())
+        if (params->config.debug)
         {
             client->carControl(0, PWMSERVOMID);
-            std::cerr << "[Error]: Camera frame lost, stopped." << std::endl;
+            if (client->keypress || show->quit)
+            {
+                client->buzzerSound(client->BUZZER_FINISH);
+                printf("-----> Preview Exit!!! <-----\n");
+                exit(0);
+            }
+            if (!show->live && show->indexLast == show->index)
+            {
+                show->show();
+                client->sendHeart();
+                usleep(10 * 1000);
+                return;
+            }
+            if (!show->live)
+                capture->set(cv::CAP_PROP_POS_FRAMES, show->index);
+        }
+        if (!capture->read(img) || img.empty())
+        {
+            client->carControl(0, PWMSERVOMID);
+            std::cerr << "[Error]: Input frame lost, stopped." << std::endl;
             params->quit = true;
             exit(-1);
-            return;
+        }
+        if (params->config.debug)
+        {
+            if (show->live)
+                show->index++;
+            else
+                show->indexLast = show->index;
         }
         const auto frameTime = std::chrono::steady_clock::now();
+        if (params->config.debug && !params->config.debugCamera)
+        {
+            const double fps = capture->get(cv::CAP_PROP_FPS);
+            params->ctrl.frameDt = std::isfinite(fps) && fps > 1.0 ? 1.0 / fps : 1.0 / 30.0;
+        }
+        else if (previousFrameTime != std::chrono::steady_clock::time_point{})
+            params->ctrl.frameDt = std::clamp(std::chrono::duration<double>(frameTime - previousFrameTime).count(),
+                                             1.0 / 120.0, 0.2);
+        previousFrameTime = frameTime;
+        ++params->cameraFrame;
         if (img.size() != cv::Size(COLSIMAGE, ROWSIMAGE))
             cv::resize(img, img, cv::Size(COLSIMAGE, ROWSIMAGE));
 
         // 帧首快照：本帧 FSM 与绘图共用，后续不再更新
         //[02] 图像存储
-        if (params->config.saveImg && !params->config.debug) // 存储原始图像
+        if (params->config.saveImg && (!params->config.debug || params->config.debugCamera)) // 存储原始图像
             savePicture(img);
-        else if (params->config.saveImg && params->config.debug) // 存储调式图像
+        else if (params->config.saveImg && params->config.debug && !params->config.debugCamera) // 存储调式图像
             show->save = true;
 
         //[03] 图像预处理
         cv::Mat imgBin;
         predeal->correction(img); // 图像矫正
+        params->cameraImage = img;
         /*---------------子线程共享数据，避免浅拷贝-----------------*/
         if (params->config.debug)
         {
             detection->inference(img);
             params->results = detection->results;
+            params->detectionFrame = params->cameraFrame;
+            params->detectionImage = img;
         }
         else
         {
@@ -435,6 +466,7 @@ public:
             std::lock_guard<std::mutex> lock(mtxImg);
             img.copyTo(imgShare);
             imageTime = frameTime;
+            imageFrameShare = params->cameraFrame;
             readyImg = true;
             cvImg.notify_one();
         }
@@ -463,6 +495,8 @@ public:
             }
             aiReady = true;
             params->results = resultsShare;
+            params->detectionFrame = resultFrameShare;
+            params->detectionImage = resultImageShare;
         }
         imgBin = predeal->binaryzation(img); // 图像二值化
 
@@ -515,6 +549,8 @@ public:
 
             // 特殊区域图像处理结果显示
             Mat imgRes = Mat::zeros(Size(COLSIMAGE, ROWSIMAGE), CV_8UC3); // 创建全黑图像
+            params->track->drawImage(imgRes);
+            center->drawImage(params, imgRes);
             fsmFactory.busy->show(imgRes);
             fsmFactory.park->show(imgRes);
             fsmFactory.stop->show(imgRes);
@@ -522,8 +558,10 @@ public:
             fsmFactory.fork->show(imgRes);
             fsmFactory.slow->show(imgRes);
             fsmFactory.yfork->show(imgRes);
+            show->drawStatus(imgRes, *params, yforkLock);
             show->setNewWindow(4, "FSM", imgRes);
             show->show();
+            client->carControl(0, PWMSERVOMID);
             client->sendHeart();
         }
         else // 实车控制

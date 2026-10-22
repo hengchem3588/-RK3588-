@@ -25,7 +25,7 @@
  *
  */
 
-#include "utils/json.hpp"
+#include "utils/params.hpp"
 
 using namespace std;
 using namespace cv;
@@ -42,6 +42,8 @@ public:
     int indexLast = -1; // 图像序号
     int frameMax = 0;   // 视频总帧数
     bool save = false;  // 图像存储
+    bool live = false;
+    bool quit = false;
 
     /**
      * @brief 显示窗口初始化
@@ -123,20 +125,35 @@ public:
      * @brief 融合后的图像显示
      *
      */
+    void drawStatus(Mat &img, const Params &params, int yforkLock)
+    {
+        static const char *const modes[] = {"NORMAL", "FORK", "PARK", "BUSY", "SLOW", "FINE",
+                                           "STOP", "CROSS", "YFORK", "OBSTACLE"};
+        const int modeIndex = std::clamp(static_cast<int>(params.mode), 0, 9);
+        putText(img, string("Mode:") + modes[modeIndex] + " Lock:" + to_string(yforkLock),
+                Point(8, 162), FONT_HERSHEY_PLAIN, 1, Scalar(0, 255, 255), 1);
+        putText(img, "C:" + to_string(params.ctrl.center) + " E:" + to_string(params.ctrl.center - COLSIMAGE / 2) +
+                     " PWM:" + to_string(params.ctrl.servo), Point(8, 178), FONT_HERSHEY_PLAIN, 1, Scalar(0, 255, 255), 1);
+        putText(img, "Stop:" + to_string(params.ctrl.stop) + " Cross:" + to_string(params.ctrl.crossStop) +
+                     " Back:" + to_string(params.ctrl.back) + " Slow:" + to_string(params.ctrl.slow),
+                Point(8, 194), FONT_HERSHEY_PLAIN, 0.9, Scalar(0, 255, 255), 1);
+        putText(img, "TargetV:" + doble2String(params.ctrl.speed, 2) + " SENT:0/MID",
+                Point(8, 210), FONT_HERSHEY_PLAIN, 1, Scalar(0, 0, 255), 1);
+    }
+
     void show(void)
     {
         if (enable)
         {
-            putText(imgShow, "Frame:" + to_string(index), Point(COLSIMAGE / 2 - 50, ROWSIMAGE * 2 - 20), cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 0.5);
+            putText(imgShow, string(live ? "LIVE:" : "Frame:") + to_string(index), Point(COLSIMAGE / 2 - 50, ROWSIMAGE * 2 - 20), cv::FONT_HERSHEY_TRIPLEX, 0.5, cv::Scalar(0, 255, 0), 0.5);
             imshow("ICAR", imgShow);
 
-            char key = waitKey(1);
-            if (key != -1)
-            {
-                if (key == 32) // 空格
-                    realShow = !realShow;
-            }
-            if (realShow)
+            const int key = waitKey(1);
+            if (key == 27 || key == 'q' || key == 'Q')
+                quit = true;
+            if (key == 32 && !live)
+                realShow = !realShow;
+            if (realShow && !live)
             {
                 index++;
                 if (index < 0)

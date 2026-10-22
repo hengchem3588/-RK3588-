@@ -31,6 +31,14 @@ using namespace std;
 class Track
 {
 public:
+    struct BranchGeometry
+    {
+        bool valid = false;
+        int splitRows = 0;
+        int nearSplitRows = 0;
+        int splitTipRow = -1;
+    };
+
     vector<PointX> pointsEdgeLeft;  // 赛道左边缘点集
     vector<PointX> pointsEdgeRight; // 赛道右边缘点集
     vector<PointX> widthBlock;      // 色块宽度=终-起（每行）
@@ -44,6 +52,8 @@ public:
     int lineArea = 0;
 
     void handle(Mat img);
+    BranchGeometry handleBranch(const Mat &img, bool left, int seedCol, int dividerCol,
+                                const Rect &exclusion = Rect());
     void handle(bool isResearch, uint16_t rowStart);
     void drawImage(Mat &img);
     void synchronizeEdges();

@@ -36,32 +36,104 @@ public:
   void show(Mat &img);
   FsmMode getMode();
 
-private:
-  /**
-   * @brief 岔路口执行步骤
-   *
-   */
-  enum Step
+  struct Status
   {
-    FORKWAIT = 0, // 监测LABEL_FORK是否到达图像底
-    FORKTURN,     // fork到底确认
-    NONE,         // 监测左/右岔路标牌
-    TURN,         // 已确认分支，单边转向
-    RUN,          // 原有：单边完成，恢复正常跟线，保持YFORK状态
-    DONE          // 本次岔路动作结束，回到监测
+    const char *step = "WAIT";
+    int direction = 0;
+    int votes = 0;
+    int nearSplitRows = 0;
+    int splitTipRow = -1;
+    int minClearance = 0;
+    int minRoadClearance = -1;
+    int minObstacleClearance = -1;
+    int minObstacleRow = -1;
+    int minObstaclePathCol = -1;
+    int obstacleLeftAtMin = -1;
+    int obstacleRightAtMin = -1;
+    int lostPathFrames = 0;
+    bool normalAligned = false;
+    bool obstacleTracked = false;
+    int obstacleMemoryFrames = 0;
+    cv::Rect exclusion;
+    cv::Rect obstacleBox;
+    std::string stopReason;
   };
 
-  Step step = Step::FORKWAIT; // 岔路口步骤
-  int countFork = 0;        // fork框底边到图像底的连续帧计数
-  int countLeft = 0;        // 左岔路标牌连续帧计数
-  int countRight = 0;      // 右岔路标牌连续帧计数
-  int countSes = 0;        // 计数经久未凑够帧数则清零
-  int timeout = 0;         // 动作执行计数
-  int lostFrames = 0;      // 岔路标牌连续消失帧数
-  bool branchLeft = false; // 分支方向
+  Status status() const;
 
+private:
+  enum class Step
+  {
+    WAIT,
+    APPROACH,
+    TURN,
+    EXIT,
+    COOLDOWN,
+    SAFE_STOP
+  };
+
+  struct Observation
+  {
+    bool present = false;
+    bool fork = false;
+    int direction = 0;
+    cv::Rect box;
+  };
+
+  Step step = Step::WAIT;
+  int direction = 0;
+  int candidateDirection = 0;
+  int votes = 0;
+  int forkVotes = 0;
+  int exitVotes = 0;
+  int lostPathFrames = 0;
+  int seedCol = COLSIMAGE / 2;
+  int dividerCol = COLSIMAGE / 2;
+  int minClearance = 0;
+  int minRoadClearance = -1;
+  int minObstacleClearance = -1;
+  int minObstacleRow = -1;
+  int minObstaclePathCol = -1;
+  int obstacleLeftAtMin = -1;
+  int obstacleRightAtMin = -1;
+  double stateFrames = 0.0;
+  double turnFrames = 0.0;
+  double signLostFrames = 0.0;
+  double obstacleAgeFrames = 0.0;
+  double noObservationFrames = 0.0;
+  double yforkSpeedCapCurrent = 0.0;
+  double lastSafePathAgeFrames = 1e9;
+  double lastSafePreviewRow = 125.0;
+  bool yforkSpeedCapInitialized = false;
+  bool sawSplit = false;
+  bool obstacleWasNear = false;
+  bool normalAligned = false;
+  std::uint64_t lastDetectionFrame = 0;
+  cv::Rect signBox;
+  cv::Rect exclusion;
+  cv::Rect obstacleBox;
+  cv::Mat obstacleMask;
+  cv::Point2f signVelocity{0.0f, 0.0f};
+  bool obstacleTracked = false;
+  Track::BranchGeometry geometry;
+  std::vector<PointX> lastSafePath;
+  int lastSafePathDirection = 0;
+  bool planBlockedByObstacle = false;
+  std::string stopReason;
+
+  Observation observe() const;
+  void updateSign(const Observation &observation, double elapsedFrames);
+  cv::Mat buildObstacleMask(const cv::Rect &referenceBox) const;
+  void updateObstacle(const cv::Rect &referenceBox, bool referenceUpdated, double elapsedFrames);
+  bool obstacleSpanAt(int row, int &left, int &right) const;
+  bool lastSafePathClear() const;
+  bool restoreLastSafePath();
+  void updateSpeedCap(double target, double elapsedFrames);
+  void applyObstacleSpeedCap(double elapsedFrames);
+  bool planBranch(const Mat &img);
+  bool exitReady() const;
+  void safeStop(const std::string &reason);
   void setStep(Step st);
   void reset();
-  void runBranch(bool left); // 单边转向
-  void cutRows();            // 切行
+  const char *stepName() const;
 };

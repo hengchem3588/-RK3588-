@@ -41,6 +41,44 @@ void Center::fitting(shared_ptr<Params> &params)
         vector<PointX> v_center(4); // 三阶贝塞尔曲线
         style = "STRIGHT";
 
+        // 丁字口屏蔽：支路打开时远端行赛道宽度会突然翻倍，把中心线吸进路口。
+        // 用底部正常宽度做基准，把超宽行的左右边缘向内收拢回正常宽度，
+        // 既不丢前瞻行数，也不会让贝塞尔拐向支路。
+        if (params->config.junctionShield && params->mode == FsmMode::NORMAL &&
+            params->track->pointsEdgeLeft.size() > 10 &&
+            params->track->pointsEdgeRight.size() > 10)
+        {
+            auto &edgeL = params->track->pointsEdgeLeft;
+            auto &edgeR = params->track->pointsEdgeRight;
+            const size_t n = std::min(edgeL.size(), edgeR.size());
+            vector<int> widths(n);
+            for (size_t i = 0; i < n; ++i)
+                widths[i] = edgeR[i].y - edgeL[i].y;
+            // 底部 1/4 行的中位宽度视为"正常赛道宽度"
+            vector<int> baseWidths(widths.end() - std::min<size_t>(n / 4, widths.size()),
+                                   widths.end());
+            std::sort(baseWidths.begin(), baseWidths.end());
+            const int baseWidth = baseWidths.empty() ? COLSIMAGE : baseWidths[baseWidths.size() / 2];
+            const int maxWidth = int(std::lround(baseWidth * params->config.junctionWidthRatio));
+            if (maxWidth < COLSIMAGE)
+            {
+                for (size_t i = 0; i < n; ++i)
+                {
+                    if (widths[i] > maxWidth)
+                    {
+                        const int excess = widths[i] - maxWidth;
+                        // 两侧对称内收，保持该行中点不动
+                        edgeL[i].y += excess / 2;
+                        edgeR[i].y -= (excess - excess / 2);
+                        if (edgeL[i].y > edgeR[i].y)
+                            edgeL[i].y = edgeR[i].y;
+                    }
+                }
+            }
+            params->track->stdevLeft = params->track->stdevEdgeCal(edgeL, ROWSIMAGE);
+            params->track->stdevRight = params->track->stdevEdgeCal(edgeR, ROWSIMAGE);
+        }
+
         // 边缘斜率重计算（边缘修正之后）
         params->track->stdevLeft = params->track->stdevEdgeCal(params->track->pointsEdgeLeft, ROWSIMAGE);
         params->track->stdevRight = params->track->stdevEdgeCal(params->track->pointsEdgeRight, ROWSIMAGE);
@@ -64,31 +102,21 @@ void Center::fitting(shared_ptr<Params> &params)
             v_center[0] = {
                 (params->track->pointsEdgeLeft[0].x + params->track->pointsEdgeRight[0].x) / 2,
                 (params->track->pointsEdgeLeft[0].y + params->track->pointsEdgeRight[0].y) / 2};
-
             v_center[1] = {
                 (params->track->pointsEdgeLeft[params->track->pointsEdgeLeft.size() / 3].x +
-                 params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() / 3].x) /
-                    2,
+                 params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() / 3].x) / 2,
                 (params->track->pointsEdgeLeft[params->track->pointsEdgeLeft.size() / 3].y +
-                 params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() / 3].y) /
-                    2};
-
+                 params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() / 3].y) / 2};
             v_center[2] = {
                 (params->track->pointsEdgeLeft[params->track->pointsEdgeLeft.size() * 2 / 3].x +
-                 params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() * 2 / 3].x) /
-                    2,
+                 params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() * 2 / 3].x) / 2,
                 (params->track->pointsEdgeLeft[params->track->pointsEdgeLeft.size() * 2 / 3].y +
-                 params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() * 2 / 3].y) /
-                    2};
-
+                 params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() * 2 / 3].y) / 2};
             v_center[3] = {
                 (params->track->pointsEdgeLeft[params->track->pointsEdgeLeft.size() * 0.9].x +
-                 params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() * 0.9].x) /
-                    2,
+                 params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() * 0.9].x) / 2,
                 (params->track->pointsEdgeLeft[params->track->pointsEdgeLeft.size() * 0.9].y +
-                 params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() * 0.9].y) /
-                    2};
-
+                 params->track->pointsEdgeRight[params->track->pointsEdgeRight.size() * 0.9].y) / 2};
             params->ctrl.centerEdge = Bezier(0.03, v_center);
             style = "STRIGHT";
         }
@@ -145,27 +173,44 @@ void Center::fitting(shared_ptr<Params> &params)
         }
     }
 
-    // 加权控制中心计算
-    int controlNum = 1;
-    for (auto p : params->ctrl.centerEdge)
+    if (params->ctrl.yforkPath)
     {
-        if (p.x < ROWSIMAGE / 2)
+        double totalWeight = 0.0;
+        double weightedColumn = 0.0;
+        for (const auto &point : params->ctrl.centerEdge)
         {
-            controlNum += ROWSIMAGE / 2;
-            params->ctrl.center += p.y * ROWSIMAGE / 2;
+            const double normalized = (point.x - params->ctrl.yforkPreviewRow) /
+                params->config.yforkPreviewSigma;
+            const double weight = std::exp(-0.5 * normalized * normalized);
+            totalWeight += weight;
+            weightedColumn += point.y * weight;
         }
-        else
-        {
-            controlNum += (ROWSIMAGE - p.x);
-            params->ctrl.center += p.y * (ROWSIMAGE - p.x);
-        }
-    }
-    if (controlNum > 1)
-    {
-        params->ctrl.center = params->ctrl.center / controlNum;
+        params->ctrl.center = totalWeight > 0.0 ? int(std::lround(weightedColumn / totalWeight)) : lastCenter;
+        style = "Y-SAFE";
     }
     else
-        params->ctrl.center = lastCenter;
+    {
+        int controlNum = 1;
+        for (auto p : params->ctrl.centerEdge)
+        {
+            if (p.x < ROWSIMAGE / 2)
+            {
+                controlNum += ROWSIMAGE / 2;
+                params->ctrl.center += p.y * ROWSIMAGE / 2;
+            }
+            else
+            {
+                controlNum += (ROWSIMAGE - p.x);
+                params->ctrl.center += p.y * (ROWSIMAGE - p.x);
+            }
+        }
+        if (controlNum > 1)
+            params->ctrl.center = params->ctrl.center / controlNum;
+        else
+            params->ctrl.center = lastCenter;
+        // 巡线横向微调：正=向图像右侧偏（车相对赛道右移），负=向左。用于整车装配的固定走线偏差补偿
+        params->ctrl.center += params->config.lineBiasPx;
+    }
 
     if (params->ctrl.center > COLSIMAGE)
         params->ctrl.center = COLSIMAGE;

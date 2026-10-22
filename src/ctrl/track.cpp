@@ -36,6 +36,78 @@ void Track::handle(Mat img)
     handle(false, 0);
 }
 
+Track::BranchGeometry Track::handleBranch(const Mat &img, bool left, int seedCol, int dividerCol,
+                                         const Rect &exclusion)
+{
+    BranchGeometry geometry;
+    if (img.empty() || img.type() != CV_8UC1 || img.size() != Size(COLSIMAGE, ROWSIMAGE))
+        return geometry;
+
+    Mat clean;
+    morphologyEx(img, clean, MORPH_CLOSE, getStructuringElement(MORPH_RECT, Size(5, 3)));
+    const Rect blocked = exclusion & Rect(0, 0, COLSIMAGE, ROWSIMAGE);
+    if (blocked.area() > 0)
+        clean(blocked).setTo(0);
+    (void)seedCol;
+    (void)dividerCol;
+    vector<PointX> edgeLeft;
+    vector<PointX> edgeRight;
+    const int bottom = ROWSIMAGE - 1 - std::min<int>(rowCutBottom, ROWSIMAGE / 4);
+    const int top = std::max<int>(50, rowCutUp);
+    for (int row = bottom; row > top; row -= 2)
+    {
+        const uchar *pixels = clean.ptr<uchar>(row);
+        vector<pair<int, int>> spans;
+        int col = 0;
+        while (col < COLSIMAGE)
+        {
+            while (col < COLSIMAGE && pixels[col] <= 127)
+                ++col;
+            const int begin = col;
+            while (col < COLSIMAGE && pixels[col] > 127)
+                ++col;
+            if (col - begin - 1 >= std::max(12, row * 9 / 100))
+                spans.emplace_back(begin, col - 1);
+        }
+        for (size_t index = 1; index < spans.size(); ++index)
+        {
+            const auto &first = spans[index - 1];
+            const auto &second = spans[index];
+            if (first.second - first.first >= 24 && second.second - second.first >= 24 &&
+                second.first - first.second >= 10)
+            {
+                ++geometry.splitRows;
+                geometry.nearSplitRows += row >= 120;
+                geometry.splitTipRow = std::max(geometry.splitTipRow, row);
+                break;
+            }
+        }
+
+        if (spans.empty())
+        {
+            if (edgeLeft.empty() && row < 170)
+                break;
+            continue;
+        }
+        const size_t selected = left ? 0 : spans.size() - 1;
+        edgeLeft.emplace_back(row, spans[selected].first);
+        edgeRight.emplace_back(row, spans[selected].second);
+    }
+
+    geometry.valid = edgeLeft.size() >= 25 && edgeLeft.front().x >= 170 &&
+        edgeLeft.front().x - edgeLeft.back().x >= 60;
+    if (!geometry.valid)
+        return geometry;
+    pointsEdgeLeft = std::move(edgeLeft);
+    pointsEdgeRight = std::move(edgeRight);
+    synchronizeEdges();
+    validRowsLeft = validRowsRight = static_cast<int>(pointsEdgeLeft.size());
+    stdevLeft = stdevEdgeCal(pointsEdgeLeft, ROWSIMAGE);
+    stdevRight = stdevEdgeCal(pointsEdgeRight, ROWSIMAGE);
+    lineArea = ROWSIMAGE - pointsEdgeLeft.back().x;
+    return geometry;
+}
+
 /**
  * @brief 赛道线识别
  *
@@ -283,7 +355,8 @@ void Track::handle(bool isResearch, uint16_t rowStart)
     stdevLeft = stdevEdgeCal(pointsEdgeLeft, ROWSIMAGE); // 计算边缘方差
     stdevRight = stdevEdgeCal(pointsEdgeRight, ROWSIMAGE);
     if (!pointsEdgeLeft.empty() && !pointsEdgeRight.empty())
-        lineArea = std::clamp(std::max(pointsEdgeLeft.back().x, pointsEdgeRight.back().x),
+        lineArea = std::clamp(ROWSIMAGE - std::max(pointsEdgeLeft.back().x,
+                                                    pointsEdgeRight.back().x),
                               0, std::max(1, ROWSIMAGE - 1 - int(rowCutUp)));
 
 }
