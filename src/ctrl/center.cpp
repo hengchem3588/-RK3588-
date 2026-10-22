@@ -62,14 +62,38 @@ void Center::fitting(shared_ptr<Params> &params)
             const int maxWidth = int(std::lround(baseWidth * params->config.junctionWidthRatio));
             if (maxWidth < COLSIMAGE)
             {
+                // 基准行的左右边缘位置：支路只从一侧打开，
+                // 连续一侧的边缘不动，只收回打开的一侧，
+                // 避免对称内收把中点留在支路方向（往里偏的根源）。
+                vector<int> baseLeft, baseRight;
+                for (size_t i = n - std::min<size_t>(n / 4, n); i < n; ++i)
+                {
+                    baseLeft.push_back(edgeL[i].y);
+                    baseRight.push_back(edgeR[i].y);
+                }
+                std::sort(baseLeft.begin(), baseLeft.end());
+                std::sort(baseRight.begin(), baseRight.end());
+                const int refLeft = baseLeft.empty() ? 0 : baseLeft[baseLeft.size() / 2];
+                const int refRight = baseRight.empty() ? COLSIMAGE - 1 : baseRight[baseRight.size() / 2];
+                const int anchorTol = 4; // 边缘位置容差(px)：变化小于该值视为未打开
+
                 for (size_t i = 0; i < n; ++i)
                 {
                     if (widths[i] > maxWidth)
                     {
                         const int excess = widths[i] - maxWidth;
-                        // 两侧对称内收，保持该行中点不动
-                        edgeL[i].y += excess / 2;
-                        edgeR[i].y -= (excess - excess / 2);
+                        const bool leftOpened = edgeL[i].y < refLeft - anchorTol;
+                        const bool rightOpened = edgeR[i].y > refRight + anchorTol;
+                        if (leftOpened && !rightOpened)
+                            edgeL[i].y += excess; // 只有左侧支路打开
+                        else if (rightOpened && !leftOpened)
+                            edgeR[i].y -= excess; // 只有右侧支路打开
+                        else
+                        {
+                            // 两侧都打开或无法确认：对称内收兜底
+                            edgeL[i].y += excess / 2;
+                            edgeR[i].y -= (excess - excess / 2);
+                        }
                         if (edgeL[i].y > edgeR[i].y)
                             edgeL[i].y = edgeR[i].y;
                     }
